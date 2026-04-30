@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, useLocation } from "react-router-dom";
 import { Hero } from "./components/Hero";
 import { Features } from "./components/Features";
 import { HowItWorks } from "./components/HowItWorks";
@@ -8,7 +8,7 @@ import { CTA } from "./components/CTA";
 import { Footer } from "./components/Footer";
 import { Navbar } from "./components/Navbar";
 import ContactFormPage from "./pages/ContactFormPage";
-import DemoVideo  from "./pages/DemoVideo";
+import DemoVideo from "./pages/DemoVideo";
 import { ExampleDemo } from "./pages/exampleDemo";
 
 function HomePage() {
@@ -25,16 +25,30 @@ function HomePage() {
   );
 }
 
-export default function App() {
+function Layout() {
+  const location = useLocation();
+
+  // hide navbar only for /example
+  const hideNavbar = location.pathname === "/example";
+
   return (
-    <BrowserRouter>
-      <Navbar />
+    <>
+      {!hideNavbar && <Navbar />}
+
       <Routes>
         <Route path="/" element={<HomePage />} />
         <Route path="/demo" element={<ContactFormPage />} />
         <Route path="/video" element={<DemoVideo />} />
         <Route path="/example" element={<ExampleDemo />} />
       </Routes>
+    </>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Layout />
     </BrowserRouter>
   );
 }
