@@ -3,7 +3,10 @@ import UTIF from "utif";
 import { useNavigate } from "react-router-dom";
 
 // ─── Config ────────────────────────────────────────────────────────────────────
-const BASE_URL = "http://127.0.0.1:8000";
+//const BASE_URL = "http://127.0.0.1:8000";
+const BASE_URL = "https://karyotyping-api-875244011562.asia-south1.run.app";
+
+
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 type Tool = "select" | "cut" | "erase" | "extend" | "merge";
