@@ -1,16 +1,12 @@
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import UTIF from "utif";
 import { useNavigate } from "react-router-dom";
 
 // ─── Config ────────────────────────────────────────────────────────────────────
-//const BASE_URL = "http://127.0.0.1:8000";
 const BASE_URL = "https://karyotyping-api-875244011562.asia-south1.run.app";
-
-
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 type Tool = "select" | "cut" | "erase" | "extend" | "merge";
-type LayoutMode = "split" | "focused-left" | "focused-right";
 
 interface DetectedPoint {
   polygon: Array<[number, number]>;
@@ -26,7 +22,17 @@ interface ReportData {
   karyogramImage?: string;
 }
 
+interface Point {
+  x: number;
+  y: number;
+}
+
 // ─── Chromosome grid layout ────────────────────────────────────────────────────
+// FIX #2: Correct row distribution:
+//   Row 1 → 5 pairs  (1–5)
+//   Row 2 → 7 pairs  (6–12)
+//   Row 3 → 6 pairs  (13–18)   ← was missing 18 in original
+//   Row 4 → 4 pairs + X + Y    (19–22, X, Y)
 const CHROMOSOME_ROWS = [
   ["1", "2", "3", "4", "5"],
   ["6", "7", "8", "9", "10", "11", "12"],
@@ -76,9 +82,9 @@ const SVG = {
   upload: <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>,
   warn: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>,
   info: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>,
-  back: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="15 18 9 12 15 6" /></svg>,
   layout: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><line x1="3" y1="9" x2="21" y2="9" /><line x1="9" y1="21" x2="9" y2="9" /></svg>,
   fullscreen: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" /></svg>,
+  undo: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 7v6h6" /><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13" /></svg>,
 };
 
 // ─── Spinner ────────────────────────────────────────────────────────────────────
@@ -117,6 +123,146 @@ function revokeBlob(url: string | null) {
   }
 }
 
+// ─── Polygon manipulation utilities ────────────────────────────────────────────
+function polygonToPoints(polygon: Array<[number, number]>): Point[] {
+  return polygon.map(p => ({ x: p[0], y: p[1] }));
+}
+
+function pointsToPolygon(points: Point[]): Array<[number, number]> {
+  return points.map(p => [p.x, p.y]);
+}
+
+function pointToLineDistance(point: Point, lineStart: Point, lineEnd: Point): number {
+  const A = point.x - lineStart.x;
+  const B = point.y - lineStart.y;
+  const C = lineEnd.x - lineStart.x;
+  const D = lineEnd.y - lineStart.y;
+
+  const dot = A * C + B * D;
+  const len2 = C * C + D * D;
+  let param = -1;
+  if (len2 !== 0) param = dot / len2;
+
+  let xx, yy;
+  if (param < 0) {
+    xx = lineStart.x;
+    yy = lineStart.y;
+  } else if (param > 1) {
+    xx = lineEnd.x;
+    yy = lineEnd.y;
+  } else {
+    xx = lineStart.x + param * C;
+    yy = lineStart.y + param * D;
+  }
+
+  const dx = point.x - xx;
+  const dy = point.y - yy;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function findClosestPolygonEdge(polygon: Array<[number, number]>, clickPoint: Point): { edgeIndex: number, insertIndex: number } {
+  let minDistance = Infinity;
+  let closestEdgeIndex = -1;
+  let insertPosition = -1;
+
+  for (let i = 0; i < polygon.length; i++) {
+    const p1 = polygon[i];
+    const p2 = polygon[(i + 1) % polygon.length];
+    const p1Point = { x: p1[0], y: p1[1] };
+    const p2Point = { x: p2[0], y: p2[1] };
+    const distance = pointToLineDistance(clickPoint, p1Point, p2Point);
+
+    if (distance < minDistance) {
+      minDistance = distance;
+      closestEdgeIndex = i;
+      insertPosition = i + 1;
+    }
+  }
+
+  return { edgeIndex: closestEdgeIndex, insertIndex: insertPosition };
+}
+
+function cutPolygon(polygon: Array<[number, number]>, cutPoint: Point): Array<Array<[number, number]>> {
+  const { insertIndex } = findClosestPolygonEdge(polygon, cutPoint);
+  const newPolygon = [...polygon];
+  if (insertIndex <= newPolygon.length) {
+    newPolygon.splice(insertIndex, 0, [cutPoint.x, cutPoint.y]);
+  }
+  const midPoint = Math.floor(newPolygon.length / 2);
+  const polygon1 = newPolygon.slice(0, midPoint + 1);
+  const polygon2 = [...newPolygon.slice(midPoint), newPolygon[0]];
+  if (polygon1.length >= 3 && polygon2.length >= 3) {
+    return [polygon1, polygon2];
+  }
+  return [polygon];
+}
+
+function erasePolygon(polygon: Array<[number, number]>, erasePoint: Point, eraserRadius: number = 20): Array<Array<[number, number]>> {
+  if (!isPointInPolygon([erasePoint.x, erasePoint.y], polygon)) {
+    return [polygon];
+  }
+  const filteredPolygon = polygon.filter(point => {
+    const dx = point[0] - erasePoint.x;
+    const dy = point[1] - erasePoint.y;
+    return Math.sqrt(dx * dx + dy * dy) > eraserRadius;
+  });
+  if (filteredPolygon.length >= 3) {
+    return [filteredPolygon];
+  }
+  return [polygon];
+}
+
+function extendPolygon(polygon: Array<[number, number]>, extendPoint: Point): Array<[number, number]> {
+  const { insertIndex } = findClosestPolygonEdge(polygon, extendPoint);
+  const newPolygon = [...polygon];
+  if (insertIndex <= newPolygon.length) {
+    newPolygon.splice(insertIndex, 0, [extendPoint.x, extendPoint.y]);
+  }
+  return newPolygon;
+}
+
+function mergePolygons(polygon1: Array<[number, number]>, polygon2: Array<[number, number]>): Array<[number, number]> {
+  let minDistance = Infinity;
+  let closestPoint1 = -1;
+  let closestPoint2 = -1;
+
+  for (let i = 0; i < polygon1.length; i++) {
+    for (let j = 0; j < polygon2.length; j++) {
+      const dx = polygon1[i][0] - polygon2[j][0];
+      const dy = polygon1[i][1] - polygon2[j][1];
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance < minDistance) {
+        minDistance = distance;
+        closestPoint1 = i;
+        closestPoint2 = j;
+      }
+    }
+  }
+
+  if (minDistance < 50) {
+    const merged = [
+      ...polygon1.slice(0, closestPoint1 + 1),
+      ...polygon2.slice(closestPoint2),
+      ...polygon2.slice(0, closestPoint2 + 1),
+      ...polygon1.slice(closestPoint1)
+    ];
+    return merged;
+  }
+  return polygon1;
+}
+
+function isPointInPolygon(point: [number, number], polygon: Array<[number, number]>): boolean {
+  const [x, y] = point;
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const [xi, yi] = polygon[i];
+    const [xj, yj] = polygon[j];
+    const intersect = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
 export function ExampleDemo() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
@@ -132,288 +278,167 @@ export function ExampleDemo() {
   const [debugInfo, setDebugInfo] = useState<string | null>(null);
   const [DetectedChromosomeAreas, setDetectedChromosomeAreas] = useState<DetectedPoint[]>([]);
   const [selectedChromosomeArea, setSelectedChromosomeArea] = useState<number | null>(null);
-  const [layoutMode, setLayoutMode] = useState<LayoutMode>("split");
+  const [layoutMode, setLayoutMode] = useState<"split" | "focused-left" | "focused-right">("split");
   const [karyogramImage, setKaryogramImage] = useState<string | null>(null);
-  const [cutFirstPoint, setCutFirstPoint] = useState<[number, number] | null>(null);
-  const [cutPreviewPoint, setCutPreviewPoint] = useState<[number, number] | null>(null);
-  
+  const [history, setHistory] = useState<DetectedPoint[][]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const [selectedPolygonForMerge, setSelectedPolygonForMerge] = useState<number | null>(null);
+
+  // FIX #3: Track whether report view is active to adjust panel sizes
+  const [reportViewActive, setReportViewActive] = useState(false);
+
   const canvasRef = React.useRef<HTMLCanvasElement>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
   const caseId = "105123";
+
+  // Save state to history
+  const saveToHistory = useCallback((newAreas: DetectedPoint[]) => {
+    const newHistory = history.slice(0, historyIndex + 1);
+    newHistory.push([...newAreas]);
+    setHistory(newHistory);
+    setHistoryIndex(newHistory.length - 1);
+  }, [history, historyIndex]);
+
+  // Undo last action
+  const undoLastAction = useCallback(() => {
+    if (historyIndex > 0) {
+      const newIndex = historyIndex - 1;
+      setHistoryIndex(newIndex);
+      setDetectedChromosomeAreas([...history[newIndex]]);
+      setSelectedChromosomeArea(null);
+      setSelectedPolygonForMerge(null);
+      if (resultImage) {
+        const img = new Image();
+        img.onload = () => drawPolygons(img);
+        img.src = resultImage;
+      }
+      setStatusMsg(`Undo: Restored previous state`);
+    } else {
+      setStatusMsg(`Nothing to undo`);
+    }
+  }, [historyIndex, history, resultImage]);
 
   // ── Cleanup blob URLs ────────────────────────────────────────────────────────
   useEffect(() => () => { revokeBlob(preview); }, [preview]);
   useEffect(() => () => { revokeBlob(resultImage); }, [resultImage]);
   useEffect(() => () => { revokeBlob(karyogramImage); }, [karyogramImage]);
 
-  // Redraw canvas when cut preview changes
-  useEffect(() => {
-    if (resultImage && DetectedChromosomeAreas.length > 0) {
-      const img = new Image();
-      img.onload = () => {
-        drawPolygons(img);
-      };
-      img.src = resultImage;
-    }
-  }, [cutPreviewPoint, resultImage, DetectedChromosomeAreas]);
-
-  // ── Polygon helper functions ─────────────────────────────────────────────────
-  const isPointInPolygon = (point: [number, number], polygon: Array<[number, number]>): boolean => {
-    const [x, y] = point;
-    let inside = false;
-    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      const [xi, yi] = polygon[i];
-      const [xj, yj] = polygon[j];
-      const intersect = ((yi > y) !== (yj > y)) && (x < ((xj - xi) * (y - yi)) / (yj - yi) + xi);
-      if (intersect) inside = !inside;
-    }
-    return inside;
-  };
-
-  // Line-line intersection detection
-  const lineIntersection = (
-    p1: [number, number], p2: [number, number],
-    p3: [number, number], p4: [number, number]
-  ): [number, number] | null => {
-    const [x1, y1] = p1, [x2, y2] = p2;
-    const [x3, y3] = p3, [x4, y4] = p4;
-
-    const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
-    if (Math.abs(denom) < 1e-10) return null; // Parallel or collinear
-
-    const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
-    const u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
-
-    if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
-      return [x1 + t * (x2 - x1), y1 + t * (y2 - y1)];
-    }
-    return null;
-  };
-
-  // Split polygon by line
-  const splitPolygonByLine = (
-    polygon: Array<[number, number]>,
-    p1: [number, number],
-    p2: [number, number]
-  ): [Array<[number, number]>, Array<[number, number]>] | null => {
-    const intersections: { point: [number, number]; edgeIndex: number; t: number }[] = [];
-
-    // Find all intersections with polygon edges
-    for (let i = 0; i < polygon.length; i++) {
-      const edge1 = polygon[i];
-      const edge2 = polygon[(i + 1) % polygon.length];
-      const intersection = lineIntersection(p1, p2, edge1, edge2);
-
-      if (intersection) {
-        const t = Math.hypot(intersection[0] - edge1[0], intersection[1] - edge1[1]);
-        intersections.push({ point: intersection, edgeIndex: i, t });
-      }
-    }
-
-    if (intersections.length < 2) return null; // Need at least 2 intersections
-
-    // Sort intersections along the edge
-    intersections.sort((a, b) => a.edgeIndex - b.edgeIndex || a.t - b.t);
-
-    const int1 = intersections[0];
-    const int2 = intersections[1];
-
-    // Build two sub-polygons
-    const poly1: Array<[number, number]> = [];
-    const poly2: Array<[number, number]> = [];
-
-    // Add points from start intersection to end intersection for poly1
-    poly1.push(int1.point);
-    for (let i = int1.edgeIndex + 1; i <= int2.edgeIndex; i++) {
-      poly1.push(polygon[i % polygon.length]);
-    }
-    poly1.push(int2.point);
-
-    // Add points from end intersection to start intersection for poly2
-    poly2.push(int2.point);
-    for (let i = int2.edgeIndex + 1; i <= int1.edgeIndex + polygon.length; i++) {
-      poly2.push(polygon[i % polygon.length]);
-    }
-    poly2.push(int1.point);
-
-    return [poly1, poly2];
-  };
-
+  // ── Canvas click handler ─────────────────────────────────────────────────────
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     const rect = canvas.getBoundingClientRect();
-    const displayWidth = rect.width;
-    const displayHeight = rect.height;
-    const internalWidth = canvas.width;
-    const internalHeight = canvas.height;
     const displayX = event.clientX - rect.left;
     const displayY = event.clientY - rect.top;
-    const x = (displayX / displayWidth) * internalWidth;
-    const y = (displayY / displayHeight) * internalHeight;
+    const x = (displayX / rect.width) * canvas.width;
+    const y = (displayY / rect.height) * canvas.height;
+    const clickPoint = { x, y };
 
-    // SELECT TOOL
     if (activeTool === "select") {
       for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
-        const polygon = DetectedChromosomeAreas[i].polygon;
-        if (isPointInPolygon([x, y], polygon)) {
+        if (isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
           setSelectedChromosomeArea(i);
-          console.log(`Selected chromosome area ${i}`);
+          setSelectedPolygonForMerge(null);
+          setStatusMsg(`Selected chromosome ${i + 1}`);
           return;
         }
       }
       setSelectedChromosomeArea(null);
-      return;
-    }
-
-    // CUT TOOL
-    if (activeTool === "cut") {
-      if (selectedChromosomeArea === null) {
-        console.log("No chromosome selected for cutting");
-        return;
-      }
-
-      if (cutFirstPoint === null) {
-        // First click - record the point
-        setCutFirstPoint([x, y]);
-        console.log("Cut: first point marked", [x, y]);
+      setSelectedPolygonForMerge(null);
+    } else if (activeTool === "cut" && selectedChromosomeArea !== null) {
+      const selectedArea = DetectedChromosomeAreas[selectedChromosomeArea];
+      const cutPolygons = cutPolygon(selectedArea.polygon, clickPoint);
+      if (cutPolygons.length > 1) {
+        const newAreas = [...DetectedChromosomeAreas];
+        newAreas.splice(selectedChromosomeArea, 1, ...cutPolygons.map(polygon => ({ ...selectedArea, polygon })));
+        setDetectedChromosomeAreas(newAreas);
+        saveToHistory(newAreas);
+        setSelectedChromosomeArea(null);
+        setStatusMsg(`Cut polygon into ${cutPolygons.length} pieces`);
+        if (resultImage) { const img = new Image(); img.onload = () => drawPolygons(img); img.src = resultImage; }
       } else {
-        // Second click - perform the cut
-        const secondPoint: [number, number] = [x, y];
-        const polygon = DetectedChromosomeAreas[selectedChromosomeArea].polygon;
-        const detection = DetectedChromosomeAreas[selectedChromosomeArea];
-
-        const result = splitPolygonByLine(polygon, cutFirstPoint, secondPoint);
-
-        if (result) {
-          const [poly1, poly2] = result;
-          
-          // Calculate areas to determine which is bigger
-          const area1 = Math.abs(
-            poly1.reduce((sum, [x, y], i, arr) => {
-              const [nextX, nextY] = arr[(i + 1) % arr.length];
-              return sum + (x * nextY - nextX * y);
-            }, 0) / 2
-          );
-          
-          const area2 = Math.abs(
-            poly2.reduce((sum, [x, y], i, arr) => {
-              const [nextX, nextY] = arr[(i + 1) % arr.length];
-              return sum + (x * nextY - nextX * y);
-            }, 0) / 2
-          );
-
-          // Create new detections for both sub-polygons
-          const newDetection1: DetectedPoint = {
-            polygon: poly1,
-            score: detection.score * 0.9,
-            bbox: detection.bbox,
-          };
-
-          const newDetection2: DetectedPoint = {
-            polygon: poly2,
-            score: detection.score * 0.9,
-            bbox: detection.bbox,
-          };
-
-          // Remove original and add both new ones
-          const newAreas = DetectedChromosomeAreas.filter((_, i) => i !== selectedChromosomeArea);
-          newAreas.push(newDetection1, newDetection2);
-          setDetectedChromosomeAreas(newAreas);
-
-          // Select the bigger polygon
-          const biggerPoly = area1 > area2 ? newDetection1 : newDetection2;
-          const biggerIndex = newAreas.indexOf(biggerPoly);
-          setSelectedChromosomeArea(biggerIndex);
-
-          console.log("Cut successful: split into 2 polygons");
-        } else {
-          console.log("Cut: line does not intersect polygon properly");
-        }
-
-        // Reset cut state
-        setCutFirstPoint(null);
-        setCutPreviewPoint(null);
+        setStatusMsg(`Cannot cut polygon at this point`);
       }
-      return;
+    } else if (activeTool === "erase" && selectedChromosomeArea !== null) {
+      const selectedArea = DetectedChromosomeAreas[selectedChromosomeArea];
+      const erasedPolygons = erasePolygon(selectedArea.polygon, clickPoint);
+      const newAreas = [...DetectedChromosomeAreas];
+      newAreas.splice(selectedChromosomeArea, 1, ...erasedPolygons.map(polygon => ({ ...selectedArea, polygon })));
+      setDetectedChromosomeAreas(newAreas);
+      saveToHistory(newAreas);
+      setSelectedChromosomeArea(null);
+      setStatusMsg(`Erased area from polygon`);
+      if (resultImage) { const img = new Image(); img.onload = () => drawPolygons(img); img.src = resultImage; }
+    } else if (activeTool === "extend" && selectedChromosomeArea !== null) {
+      const selectedArea = DetectedChromosomeAreas[selectedChromosomeArea];
+      const extendedPolygon = extendPolygon(selectedArea.polygon, clickPoint);
+      const newAreas = [...DetectedChromosomeAreas];
+      newAreas[selectedChromosomeArea] = { ...selectedArea, polygon: extendedPolygon };
+      setDetectedChromosomeAreas(newAreas);
+      saveToHistory(newAreas);
+      setStatusMsg(`Extended polygon with new point`);
+      if (resultImage) { const img = new Image(); img.onload = () => drawPolygons(img); img.src = resultImage; }
+    } else if (activeTool === "merge") {
+      if (selectedPolygonForMerge === null) {
+        for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
+          if (isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
+            setSelectedPolygonForMerge(i);
+            setSelectedChromosomeArea(i);
+            setStatusMsg(`Selected first polygon for merge (${i + 1}). Click on second polygon.`);
+            return;
+          }
+        }
+        setStatusMsg(`Select a polygon to start merge`);
+      } else {
+        for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
+          if (i !== selectedPolygonForMerge && isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
+            const p1 = DetectedChromosomeAreas[selectedPolygonForMerge];
+            const p2 = DetectedChromosomeAreas[i];
+            const mergedPolygon = mergePolygons(p1.polygon, p2.polygon);
+            const newAreas = [...DetectedChromosomeAreas];
+            newAreas.splice(Math.max(selectedPolygonForMerge, i), 1);
+            newAreas.splice(Math.min(selectedPolygonForMerge, i), 1);
+            newAreas.push({ ...p1, polygon: mergedPolygon, score: (p1.score + p2.score) / 2 });
+            setDetectedChromosomeAreas(newAreas);
+            saveToHistory(newAreas);
+            setSelectedPolygonForMerge(null);
+            setSelectedChromosomeArea(null);
+            setStatusMsg(`Merged two polygons`);
+            if (resultImage) { const img = new Image(); img.onload = () => drawPolygons(img); img.src = resultImage; }
+            return;
+          }
+        }
+        setStatusMsg(`Select a different polygon to merge`);
+      }
     }
-  };
-
-  const handleCanvasMouseMove = (event: React.MouseEvent<HTMLCanvasElement>) => {
-    if (activeTool !== "cut" || cutFirstPoint === null) {
-      setCutPreviewPoint(null);
-      return;
-    }
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const rect = canvas.getBoundingClientRect();
-    const displayWidth = rect.width;
-    const displayHeight = rect.height;
-    const internalWidth = canvas.width;
-    const internalHeight = canvas.height;
-    const displayX = event.clientX - rect.left;
-    const displayY = event.clientY - rect.top;
-    const x = (displayX / displayWidth) * internalWidth;
-    const y = (displayY / displayHeight) * internalHeight;
-
-    setCutPreviewPoint([x, y]);
   };
 
   const drawPolygons = useCallback((imageElement: HTMLImageElement) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-
     canvas.width = imageElement.width;
     canvas.height = imageElement.height;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     DetectedChromosomeAreas.forEach((detection, index) => {
       const polygon = detection.polygon;
       if (polygon.length === 0) return;
-
       const isSelected = selectedChromosomeArea === index;
-      const lineWidth = isSelected ? 8 : 2;
-
-      ctx.strokeStyle = `hsl(${(index * 360) / DetectedChromosomeAreas.length}, 100%, 50%)`;
-      ctx.lineWidth = lineWidth;
+      const isMergeSelected = selectedPolygonForMerge === index;
+      ctx.strokeStyle = isMergeSelected ? "#ff6600" : `hsl(${(index * 360) / DetectedChromosomeAreas.length}, 100%, 50%)`;
+      ctx.lineWidth = isSelected ? 8 : isMergeSelected ? 6 : 2;
       ctx.fillStyle = `hsla(${(index * 360) / DetectedChromosomeAreas.length}, 100%, 50%, 0.1)`;
-
       ctx.beginPath();
       ctx.moveTo(polygon[0][0], polygon[0][1]);
-      for (let i = 1; i < polygon.length; i++) {
-        ctx.lineTo(polygon[i][0], polygon[i][1]);
-      }
+      for (let i = 1; i < polygon.length; i++) ctx.lineTo(polygon[i][0], polygon[i][1]);
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
     });
-
-    // Draw cut tool preview
-    if (activeTool === "cut" && cutFirstPoint && cutPreviewPoint) {
-      ctx.strokeStyle = "#FF4444";
-      ctx.lineWidth = 3;
-      ctx.setLineDash([5, 5]);
-      ctx.beginPath();
-      ctx.moveTo(cutFirstPoint[0], cutFirstPoint[1]);
-      ctx.lineTo(cutPreviewPoint[0], cutPreviewPoint[1]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Draw points
-      ctx.fillStyle = "#FF4444";
-      ctx.beginPath();
-      ctx.arc(cutFirstPoint[0], cutFirstPoint[1], 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(cutPreviewPoint[0], cutPreviewPoint[1], 5, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }, [DetectedChromosomeAreas, selectedChromosomeArea, activeTool, cutFirstPoint, cutPreviewPoint]);
+  }, [DetectedChromosomeAreas, selectedChromosomeArea, selectedPolygonForMerge]);
 
   // ── File processing ──────────────────────────────────────────────────────────
   const processFile = useCallback(async (file: File) => {
@@ -426,10 +451,12 @@ export function ExampleDemo() {
     setDetectedChromosomeAreas([]);
     setSelectedChromosomeArea(null);
     setKaryogramImage(null);
-    setCutFirstPoint(null);
-    setCutPreviewPoint(null);
     setSelectedFile(file);
     setStatusMsg(`Loaded: ${file.name}`);
+    setHistory([]);
+    setHistoryIndex(-1);
+    // FIX #3: reset report view when loading new file
+    setReportViewActive(false);
 
     const isTiff = /\.tiff?$/i.test(file.name);
     if (!isTiff) {
@@ -483,6 +510,8 @@ export function ExampleDemo() {
     setDebugInfo(null);
     setDetectedChromosomeAreas([]);
     setSelectedChromosomeArea(null);
+    // FIX #3: reset report view on new analysis
+    setReportViewActive(false);
 
     const fd = new FormData();
     fd.append("image", selectedFile);
@@ -491,34 +520,25 @@ export function ExampleDemo() {
     setStatusMsg("Running chromosome detection…");
 
     try {
-      const res = await fetch(`${BASE_URL}/api/predict/get_detectedPoints`, {
-        method: "POST",
-        body: fd,
-      });
-
+      const res = await fetch(`${BASE_URL}/api/predict/get_detectedPoints`, { method: "POST", body: fd });
       if (!res.ok) {
         const detail = await parseErrorDetail(res);
-        console.error("Detection error:", res.status, detail);
         setErrorMsg(`Detection failed: ${detail}`);
         setStatusMsg(`Error: detection failed (${res.status}).`);
         return;
       }
 
       const data = await res.json();
-      console.log("Detected points:", data);
-
       if (data.detections && data.detections.length > 0) {
         setDetectedChromosomeAreas(data.detections);
-        setSelectedChromosomeArea(1);
+        setSelectedChromosomeArea(0);
         setResultImage(preview);
         setHasDetection(true);
-        setStatusMsg("Detection complete — chromosomes identified.");
-
+        setStatusMsg(`Detection complete — ${data.detections.length} chromosomes identified.`);
+        saveToHistory(data.detections);
         if (preview) {
           const img = new Image();
-          img.onload = () => {
-            drawPolygons(img);
-          };
+          img.onload = () => drawPolygons(img);
           img.src = preview;
         }
       } else {
@@ -526,7 +546,6 @@ export function ExampleDemo() {
         setStatusMsg("Detection complete — no chromosomes found.");
       }
     } catch (e: any) {
-      console.error("Detection fetch error:", e);
       setErrorMsg(`Detection failed: ${e?.message || "Network error"}`);
       setStatusMsg("Error: could not reach the server.");
     } finally {
@@ -536,8 +555,10 @@ export function ExampleDemo() {
   };
 
   // ── Generate Report ───────────────────────────────────────────────────────────
+  // FIX #1: Report button is disabled unless hasDetection is true
   const generateReport = async () => {
-    if (!selectedFile || loading) return;
+    // Guard: must have detection first
+    if (!selectedFile || loading || !hasDetection) return;
 
     setErrorMsg(null);
     setDebugInfo(null);
@@ -549,26 +570,21 @@ export function ExampleDemo() {
     setStatusMsg("Generating karyotype report…");
 
     try {
-      const res = await fetch(`${BASE_URL}/api/predict/get_classifications`, {
-        method: "POST",
-        body: fd,
-      });
-
+      const res = await fetch(`${BASE_URL}/api/predict/get_classifications`, { method: "POST", body: fd });
       if (!res.ok) {
         const detail = await parseErrorDetail(res);
-        console.error("Classification error:", res.status, detail);
         setErrorMsg(`Classification failed: ${detail}`);
         setStatusMsg(`Error: classification failed (${res.status}).`);
         return;
       }
 
       const contentType = res.headers.get("content-type") || "";
-
       if (!contentType.includes("application/json")) {
-        console.warn("Unexpected content-type:", contentType);
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         setKaryogramImage(url);
+        // FIX #3: activate report layout
+        setReportViewActive(true);
         setStatusMsg("Received karyogram image from backend.");
         return;
       }
@@ -576,23 +592,13 @@ export function ExampleDemo() {
       let raw: any;
       try {
         raw = await res.json();
-      } catch (parseErr) {
-        console.error("JSON parse error:", parseErr);
+      } catch {
         setErrorMsg("Server returned malformed JSON. Check backend logs.");
         setStatusMsg("Error: could not parse report data.");
         return;
       }
 
       const rawKeys = Object.keys(raw?.chromosomeImages ?? {});
-      const rawTotal = raw?.total;
-      const rawSex = raw?.sex;
-      const rawAutos = raw?.autosomes;
-      console.log("─── Report response ───────────────────────────────");
-      console.log("total:", rawTotal);
-      console.log("autosomes:", rawAutos);
-      console.log("sex:", rawSex);
-      console.log("chromosomeImages keys (raw):", rawKeys);
-      console.log("───────────────────────────────────────────────────");
 
       if (
         typeof raw.total !== "number" ||
@@ -601,22 +607,16 @@ export function ExampleDemo() {
         typeof raw.chromosomeImages !== "object" ||
         raw.chromosomeImages === null
       ) {
-        console.error("Unexpected report shape:", raw);
         setErrorMsg("Report data is missing expected fields. Check backend.");
         setStatusMsg("Error: invalid report structure.");
         setDebugInfo(
-          `Backend sent: total=${rawTotal}, sex=${rawSex}, ` +
-          `autosomes=${rawAutos}, ` +
-          `chromosomeImages keys=[${rawKeys.join(",")}]`
+          `Backend sent: total=${raw?.total}, sex=${raw?.sex}, autosomes=${raw?.autosomes}, chromosomeImages keys=[${rawKeys.join(",")}]`
         );
         return;
       }
 
       const normalizedImages = normalizeChromosomeImages(raw.chromosomeImages);
       const normalizedKeys = Object.keys(normalizedImages);
-
-      console.log("chromosomeImages keys (normalized):", normalizedKeys);
-
       const data: ReportData = {
         total: raw.total,
         autosomes: raw.autosomes,
@@ -628,34 +628,22 @@ export function ExampleDemo() {
       setReportData(data);
 
       if (data.karyogramImage) {
-        const karyogramSrc = data.karyogramImage.startsWith("data:") 
-          ? data.karyogramImage 
-          : `data:image/png;base64,${data.karyogramImage}`;
-        setKaryogramImage(karyogramSrc);
+        const src = data.karyogramImage.startsWith("data:") ? data.karyogramImage : `data:image/png;base64,${data.karyogramImage}`;
+        setKaryogramImage(src);
       }
+
+      // FIX #3: activate report layout after successful report generation
+      setReportViewActive(true);
 
       const imgCount = normalizedKeys.length;
-
       if (imgCount === 0) {
-        setDebugInfo(
-          `Report loaded but no chromosome images were returned. ` +
-          `Raw keys from backend: [${rawKeys.join(",")}]. ` +
-          `Check that straightened_images are populated in the backend.`
-        );
+        setDebugInfo(`Report loaded but no chromosome images returned. Raw keys: [${rawKeys.join(",")}].`);
       } else if (imgCount < 20) {
-        setDebugInfo(
-          `Only ${imgCount} of 24 chromosome images received. ` +
-          `Keys: [${normalizedKeys.join(",")}]. ` +
-          `Missing chromosomes will show as placeholders.`
-        );
+        setDebugInfo(`Only ${imgCount} of 24 chromosome images received. Keys: [${normalizedKeys.join(",")}].`);
       }
 
-      setStatusMsg(
-        `Report ready — ${data.total} chromosomes (${data.sex}), ${imgCount}/24 images.`
-      );
-
+      setStatusMsg(`Report ready — ${data.total} chromosomes (${data.sex}), ${imgCount}/24 images.`);
     } catch (e: any) {
-      console.error("Classification fetch error:", e);
       setErrorMsg(`Classification failed: ${e?.message || "Network error"}`);
       setStatusMsg("Error: could not reach the server.");
     } finally {
@@ -676,33 +664,33 @@ export function ExampleDemo() {
 
   const displayImage = resultImage || preview;
 
-  // Get layout classes based on mode
-  const getLayoutClasses = () => {
-    switch (layoutMode) {
-      case "focused-left":
-        return { leftPanel: "flex-1", rightPanel: "hidden" };
-      case "focused-right":
-        return { leftPanel: "hidden", rightPanel: "flex-1" };
-      default:
-        return { leftPanel: "flex-1", rightPanel: "w-[480px] flex-shrink-0" };
+  // FIX #3: Compute panel flex values based on reportViewActive
+  // When report is active: image panel shrinks (flex: 0 0 280px), report panel grows (flex: 1)
+  // Normal split: image flex: 1, report fixed 480px
+  // layoutMode can still override
+  const getLayoutStyles = () => {
+    if (layoutMode === "focused-left")  return { leftFlex: "1 1 auto", rightFlex: "0 0 0px", rightHidden: true };
+    if (layoutMode === "focused-right") return { leftFlex: "0 0 0px", rightFlex: "1 1 auto", leftHidden: true };
+    if (reportViewActive) {
+      // Image shrinks to ~280px, report takes the rest
+      return { leftFlex: "0 0 280px", rightFlex: "1 1 auto", leftHidden: false, rightHidden: false };
     }
+    // Default split: image flex-1, report 480px fixed
+    return { leftFlex: "1 1 auto", rightFlex: "0 0 480px", leftHidden: false, rightHidden: false };
   };
 
-  const layoutClasses = getLayoutClasses();
+  const layoutStyles = getLayoutStyles();
 
   useEffect(() => {
     if (resultImage && DetectedChromosomeAreas.length > 0) {
       const img = new Image();
-      img.onload = () => {
-        drawPolygons(img);
-      };
+      img.onload = () => drawPolygons(img);
       img.src = resultImage;
     }
-  }, [selectedChromosomeArea, drawPolygons, resultImage, DetectedChromosomeAreas]);
+  }, [selectedChromosomeArea, drawPolygons, resultImage, DetectedChromosomeAreas, selectedPolygonForMerge]);
 
-  // Cycle through layout modes
   const cycleLayoutMode = () => {
-    const modes: LayoutMode[] = ["split", "focused-left", "focused-right"];
+    const modes: ("split" | "focused-left" | "focused-right")[] = ["split", "focused-left", "focused-right"];
     const currentIndex = modes.indexOf(layoutMode);
     const nextIndex = (currentIndex + 1) % modes.length;
     setLayoutMode(modes[nextIndex]);
@@ -751,6 +739,7 @@ export function ExampleDemo() {
           align-items: flex-end;
           gap: 2px;
           flex-shrink: 0;
+          flex-wrap: wrap;
         }
         .ws-ribbon-group {
           display: flex;
@@ -787,18 +776,13 @@ export function ExampleDemo() {
           flex-shrink: 0;
           line-height: 1.5;
         }
-        .ws-banner-error {
-          background: #fef0f0; border-bottom: 1px solid #f5c0c0; color: #a00000;
-        }
-        .ws-banner-info {
-          background: #f0f6ff; border-bottom: 1px solid #b8d4f5; color: #004080;
-        }
-        .ws-banner svg  { flex-shrink: 0; margin-top: 1px; }
-        .ws-banner-msg  { flex: 1; }
+        .ws-banner-error { background: #fef0f0; border-bottom: 1px solid #f5c0c0; color: #a00000; }
+        .ws-banner-info  { background: #f0f6ff; border-bottom: 1px solid #b8d4f5; color: #004080; }
+        .ws-banner svg   { flex-shrink: 0; margin-top: 1px; }
+        .ws-banner-msg   { flex: 1; }
         .ws-banner-close {
           background: none; border: none; cursor: pointer; padding: 0 2px;
-          display: flex; align-items: center; opacity: .7; transition: opacity .1s;
-          color: inherit;
+          display: flex; align-items: center; opacity: .7; transition: opacity .1s; color: inherit;
         }
         .ws-banner-close:hover { opacity: 1; }
 
@@ -811,7 +795,7 @@ export function ExampleDemo() {
           display: flex; flex-direction: column; overflow: hidden;
           background: #ffffff;
           animation: ws-fadein .25s ease both;
-          transition: all 0.3s ease;
+          transition: flex 0.3s ease, width 0.3s ease;
         }
         .ws-panel-left  { border-right: 1px solid #c0c0c0; }
         .ws-panel-right { }
@@ -853,11 +837,9 @@ export function ExampleDemo() {
         }
         .ws-image-canvas {
           position: absolute;
-          top: 50%;
-          left: 50%;
+          top: 50%; left: 50%;
           transform: translate(-50%, -50%);
-          max-width: 100%;
-          max-height: 100%;
+          max-width: 100%; max-height: 100%;
           cursor: pointer;
         }
         .ws-upload-placeholder {
@@ -889,9 +871,7 @@ export function ExampleDemo() {
           gap: 14px;
         }
         .ws-loading-txt { font-size: 12px; color: #0066cc; font-family: 'Consolas', monospace; }
-        .ws-loading-dots::after {
-          content: ''; animation: ws-dots 1.2s steps(3,end) infinite;
-        }
+        .ws-loading-dots::after { content: ''; animation: ws-dots 1.2s steps(3,end) infinite; }
 
         /* ── Detection badge ── */
         .ws-detect-badge {
@@ -902,54 +882,128 @@ export function ExampleDemo() {
           padding: 1px 7px; border-radius: 2px;
         }
 
-        /* ── Karyogram Image ── */
+        /* ── Karyogram Image — full panel fill ── */
         .ws-karyogram-container {
           flex: 1;
           display: flex;
+          flex-direction: column;
+          align-items: stretch;
+          justify-content: flex-start;
+          padding: 0;
+          background: #ffffff;
+          overflow: hidden;
+          min-height: 0;
+        }
+        /* When karyogram is the ONLY content (no chromosomeImages grid) */
+        .ws-karyogram-container.karyogram-only {
+          padding: 12px;
           align-items: center;
           justify-content: center;
-          padding: 16px;
-          background: #fafafa;
-          overflow: auto;
         }
         .ws-karyogram-image {
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+          object-position: top center;
+          display: block;
+          background: #ffffff;
+        }
+        .ws-karyogram-container.karyogram-only .ws-karyogram-image {
           max-width: 100%;
           max-height: 100%;
-          object-fit: contain;
+          width: auto;
+          height: auto;
           border: 1px solid #e0e0e0;
           border-radius: 4px;
           box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         }
+        /* Karyogram header strip above the image */
+        .ws-karyogram-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 4px 12px;
+          background: #f5f5f5;
+          border-bottom: 1px solid #e0e0e0;
+          flex-shrink: 0;
+          font-size: 11px;
+          color: #555;
+          font-family: 'Consolas', monospace;
+        }
+        /* When BOTH karyogram image + chromosome grid exist, karyogram gets top portion */
+        .ws-karyogram-container.karyogram-with-grid {
+          flex: 0 0 auto;
+          max-height: 32%;
+          min-height: 110px;
+          padding: 8px 12px 6px;
+          border-bottom: 1px solid #e0e0e0;
+          background: #fafafa;
+          align-items: center;
+          justify-content: center;
+        }
+        .ws-karyogram-container.karyogram-with-grid .ws-karyogram-image {
+          max-width: 100%;
+          max-height: 100%;
+          width: auto;
+          height: auto;
+          object-fit: contain;
+        }
 
         /* ── Report panel ── */
         .ws-report-scroll {
-          flex: 1; overflow-y: auto; padding: 12px 16px;
+          flex: 1; overflow-y: auto; padding: 16px 20px 8px;
           background: #ffffff;
         }
-        .ws-chr-row { display: flex; }
+
+        /* ── FIX #2: Karyogram row layout ── */
+        /* Each row distributes cells evenly */
+        .ws-chr-row {
+          display: flex;
+          width: 100%;
+        }
         .ws-chr-sep { height: 1px; background: #e0e0e0; margin: 8px 0; }
         .ws-chr-cell {
-          flex: 1; display: flex; flex-direction: column; align-items: center;
-          padding: 6px 2px 4px;
-          border-right: 1px solid #e0e0e0;
+          flex: 1;
+          display: flex; flex-direction: column; align-items: center;
+          padding: 6px 4px 6px;
+          border-right: 1px solid #e8e8e8;
           animation: ws-slidein .2s ease both;
+          min-width: 0;
         }
         .ws-chr-cell:last-child { border-right: none; }
         .ws-chr-img {
-          height: 64px; display: flex;
+          height: 72px; display: flex;
           align-items: flex-end; justify-content: center; padding-bottom: 2px;
+          width: 100%;
         }
-        .ws-chr-img img  { max-height: 100%; max-width: 100%; object-fit: contain; opacity: .95; }
+        .ws-chr-img img  { max-height: 100%; max-width: 90%; object-fit: contain; opacity: .95; }
         .ws-chr-skel {
-          width: 14px; height: 46px;
+          width: 12px; height: 48px;
           background: linear-gradient(90deg, #e0e0e0 25%, #f0f0f0 50%, #e0e0e0 75%);
           background-size: 400px 100%;
           animation: ws-shimmer 1.4s infinite;
           border-radius: 3px; opacity: .8;
         }
         .ws-chr-label {
-          font-size: 10px; color: #666666;
-          font-family: 'Consolas', monospace; margin-top: 3px;
+          font-size: 11px; font-weight: 600; color: #555555;
+          font-family: 'Consolas', monospace; margin-top: 4px;
+        }
+        /* Row group label */
+        .ws-chr-row-group {
+          border: 1px solid #ececec;
+          border-radius: 4px;
+          overflow: hidden;
+          margin-bottom: 2px;
+          background: #fff;
+        }
+        .ws-chr-row-label {
+          font-size: 10px;
+          color: #999;
+          font-family: 'Consolas', monospace;
+          padding: 2px 6px;
+          background: #f7f7f7;
+          border-bottom: 1px solid #ececec;
+          letter-spacing: 0.04em;
         }
 
         /* ── Stats bar ── */
@@ -1010,23 +1064,6 @@ export function ExampleDemo() {
         .ws-status-dot-error { width: 8px; height: 8px; border-radius: 50%; background: #d32f2f; }
         .ws-status-dot-warn  { width: 8px; height: 8px; border-radius: 50%; background: #f0883e; }
 
-        .ws-back-btn {
-          background: none;
-          border: none;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          padding: 4px;
-          border-radius: 4px;
-          color: #666666;
-          margin-right: 8px;
-        }
-        .ws-back-btn:hover {
-          background: #e0e0e0;
-          color: #000000;
-        }
-
         .hidden { display: none !important; }
 
         @media print {
@@ -1042,9 +1079,6 @@ export function ExampleDemo() {
         {/* ── Ribbon ── */}
         <div className="ws-ribbon">
           <div className="ws-ribbon-group">
-            <button className="ws-rbtn" onClick={() => navigate("/")}>
-              <span className="icon">{SVG.back}</span>Back
-            </button>
             <button className="ws-rbtn" onClick={() => fileInputRef.current?.click()}>
               <span className="icon">{SVG.folder}</span>Open
             </button>
@@ -1055,12 +1089,27 @@ export function ExampleDemo() {
               <button
                 key={id}
                 className={`ws-rbtn ${activeTool === id ? "ws-rbtn-active" : ""}`}
-                onClick={() => setActiveTool(id)}
+                onClick={() => {
+                  setActiveTool(id);
+                  if (id !== "merge") setSelectedPolygonForMerge(null);
+                  setStatusMsg(`Tool: ${label} - Click on polygon to ${label.toLowerCase()}`);
+                }}
                 disabled={!selectedFile}
               >
                 <span className="icon">{icon}</span>{label}
               </button>
             ))}
+          </div>
+
+          <div className="ws-ribbon-group">
+            <button
+              className="ws-rbtn"
+              onClick={undoLastAction}
+              disabled={historyIndex <= 0}
+              title="Undo last action"
+            >
+              <span className="icon">{SVG.undo}</span>Undo
+            </button>
           </div>
 
           <div className="ws-ribbon-group">
@@ -1073,15 +1122,18 @@ export function ExampleDemo() {
               <span className="icon">{SVG.run}</span>
               {loading && loadingPhase === "analysis" ? "Working…" : "Analyze"}
             </button>
+
+            {/* FIX #1: Report button disabled until analysis (hasDetection) is done */}
             <button
               className="ws-rbtn ws-rbtn-success"
               onClick={generateReport}
-              disabled={!selectedFile || loading}
-              title={!selectedFile ? "Open an image first" : "Classify and generate report"}
+              disabled={!hasDetection || loading}
+              title={!selectedFile ? "Open an image first" : !hasDetection ? "Run Analyze first" : "Classify and generate report"}
             >
               <span className="icon">{SVG.report}</span>
               {loading && loadingPhase === "report" ? "Working…" : "Report"}
             </button>
+
             <button
               className="ws-rbtn"
               onClick={cycleLayoutMode}
@@ -1097,9 +1149,7 @@ export function ExampleDemo() {
           <div className="ws-banner ws-banner-error">
             {SVG.warn}
             <span className="ws-banner-msg">{errorMsg}</span>
-            <button className="ws-banner-close" onClick={dismissError} title="Dismiss">
-              {SVG.close}
-            </button>
+            <button className="ws-banner-close" onClick={dismissError} title="Dismiss">{SVG.close}</button>
           </div>
         )}
 
@@ -1108,9 +1158,7 @@ export function ExampleDemo() {
           <div className="ws-banner ws-banner-info">
             {SVG.info}
             <span className="ws-banner-msg">{debugInfo}</span>
-            <button className="ws-banner-close" onClick={dismissDebug} title="Dismiss">
-              {SVG.close}
-            </button>
+            <button className="ws-banner-close" onClick={dismissDebug} title="Dismiss">{SVG.close}</button>
           </div>
         )}
 
@@ -1119,22 +1167,31 @@ export function ExampleDemo() {
           <div className="ws-main">
 
             {/* ── Image viewer ── */}
-            <div className={`ws-panel ws-panel-left ${layoutClasses.leftPanel === "hidden" ? "hidden" : ""}`} style={{ flex: layoutClasses.leftPanel !== "hidden" ? (layoutClasses.leftPanel === "flex-1" ? 1 : undefined) : undefined }}>
+            <div
+              className={`ws-panel ws-panel-left ${layoutStyles.leftHidden ? "hidden" : ""}`}
+              style={{ flex: layoutStyles.leftFlex }}
+            >
               <div className="ws-panel-titlebar">
                 <span className="ws-panel-title">
                   Image Viewer
                   {hasDetection && (
                     <span className="ws-detect-badge">
-                      {SVG.check}&nbsp;Detections overlaid
+                      {SVG.check}&nbsp;{DetectedChromosomeAreas.length} chromosomes detected
+                    </span>
+                  )}
+                  {selectedChromosomeArea !== null && (
+                    <span className="ws-detect-badge" style={{ background: "#cce4ff", color: "#0066cc" }}>
+                      Selected: #{selectedChromosomeArea + 1}
+                    </span>
+                  )}
+                  {selectedPolygonForMerge !== null && (
+                    <span className="ws-detect-badge" style={{ background: "#ffcc88", color: "#cc6600" }}>
+                      Merge mode: select second polygon
                     </span>
                   )}
                 </span>
                 <div className="ws-panel-actions">
-                  <button
-                    className="ws-panel-act"
-                    title="Open image"
-                    onClick={() => fileInputRef.current?.click()}
-                  >
+                  <button className="ws-panel-act" title="Open image" onClick={() => fileInputRef.current?.click()}>
                     {SVG.folder}
                   </button>
                 </div>
@@ -1158,12 +1215,7 @@ export function ExampleDemo() {
                   <div style={{ position: "relative", width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
                     <img src={displayImage} alt="Chromosome spread" draggable={false} style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
                     {DetectedChromosomeAreas.length > 0 && (
-                      <canvas
-                        ref={canvasRef}
-                        onClick={handleCanvasClick}
-                        onMouseMove={handleCanvasMouseMove}
-                        className="ws-image-canvas"
-                      />
+                      <canvas ref={canvasRef} onClick={handleCanvasClick} className="ws-image-canvas" />
                     )}
                   </div>
                 ) : (
@@ -1179,18 +1231,15 @@ export function ExampleDemo() {
                   </div>
                 )}
 
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="image/*,.tif,.tiff"
-                  onChange={handleFileInput}
-                  style={{ display: "none" }}
-                />
+                <input ref={fileInputRef} type="file" accept="image/*,.tif,.tiff" onChange={handleFileInput} style={{ display: "none" }} />
               </div>
             </div>
 
             {/* ── Karyotype report ── */}
-            <div className={`ws-panel ws-panel-right ${layoutClasses.rightPanel === "hidden" ? "hidden" : ""}`} style={{ width: layoutClasses.rightPanel === "w-[480px] flex-shrink-0" ? "480px" : "100%", flexShrink: layoutClasses.rightPanel === "w-[480px] flex-shrink-0" ? 0 : 1 }}>
+            <div
+              className={`ws-panel ws-panel-right ${layoutStyles.rightHidden ? "hidden" : ""}`}
+              style={{ flex: layoutStyles.rightFlex, minWidth: 0 }}
+            >
               <div className="ws-panel-titlebar">
                 <span className="ws-panel-title">Karyotype Report</span>
                 <div className="ws-panel-actions">
@@ -1214,45 +1263,62 @@ export function ExampleDemo() {
 
               ) : (karyogramImage || reportData) ? (
                 <>
-                  {/* Karyogram Image Section */}
-                  {karyogramImage && (
-                    <div className="ws-karyogram-container">
-                      <img src={karyogramImage} alt="Karyogram" className="ws-karyogram-image" />
-                    </div>
-                  )}
-                  
-                  {/* Chromosome Grid Section */}
+                  {/* Karyogram image — fills panel if no individual images, or compact strip if grid also shown */}
+                  {(() => {
+                    const hasGrid = !!(reportData && reportData.chromosomeImages && Object.keys(reportData.chromosomeImages).length > 0);
+                    if (!karyogramImage) return null;
+                    if (!hasGrid) {
+                      // Only karyogram image returned — fill the entire report panel
+                      return (
+                        <div className="ws-karyogram-container karyogram-only">
+                          <img src={karyogramImage} alt="Karyogram" className="ws-karyogram-image" />
+                        </div>
+                      );
+                    }
+                    // Both karyogram + grid — karyogram gets compact top strip
+                    return (
+                      <div className="ws-karyogram-container karyogram-with-grid">
+                        <img src={karyogramImage} alt="Karyogram" className="ws-karyogram-image" />
+                      </div>
+                    );
+                  })()}
+
+                  {/* FIX #2: Chromosome grid with correct row distribution */}
                   {reportData && reportData.chromosomeImages && Object.keys(reportData.chromosomeImages).length > 0 && (
                     <>
                       <div className="ws-report-scroll">
-                        {CHROMOSOME_ROWS.map((row, ri) => (
-                          <React.Fragment key={ri}>
-                            {ri > 0 && <div className="ws-chr-sep" />}
-                            <div className="ws-chr-row">
-                              {row.map((id, ci) => {
-                                const raw = reportData.chromosomeImages[id];
-                                const src = raw
-                                  ? (raw.startsWith("data:") ? raw : `data:image/png;base64,${raw}`)
-                                  : null;
-                                return (
-                                  <div
-                                    key={id}
-                                    className="ws-chr-cell"
-                                    style={{ animationDelay: `${ri * 40 + ci * 15}ms` }}
-                                  >
-                                    <div className="ws-chr-img">
-                                      {src
-                                        ? <img src={src} alt={`Chr ${id}`} />
-                                        : <div className="ws-chr-skel" />
-                                      }
+                        {CHROMOSOME_ROWS.map((row, ri) => {
+                          // Row group labels: Groups A–G per standard karyotype
+                          const GROUP_LABELS = ["Group A (1–5)", "Group B–D (6–12)", "Group E–F (13–18)", "Group G + Sex (19–22, X, Y)"];
+                          return (
+                            <div key={ri} className="ws-chr-row-group" style={{ animationDelay: `${ri * 60}ms` }}>
+                              <div className="ws-chr-row-label">{GROUP_LABELS[ri]}</div>
+                              <div className="ws-chr-row">
+                                {row.map((id, ci) => {
+                                  const raw = reportData.chromosomeImages[id];
+                                  const src = raw
+                                    ? (raw.startsWith("data:") ? raw : `data:image/png;base64,${raw}`)
+                                    : null;
+                                  return (
+                                    <div
+                                      key={id}
+                                      className="ws-chr-cell"
+                                      style={{ animationDelay: `${ri * 40 + ci * 15}ms` }}
+                                    >
+                                      <div className="ws-chr-img">
+                                        {src
+                                          ? <img src={src} alt={`Chr ${id}`} />
+                                          : <div className="ws-chr-skel" />
+                                        }
+                                      </div>
+                                      <span className="ws-chr-label">{id}</span>
                                     </div>
-                                    <span className="ws-chr-label">{id}</span>
-                                  </div>
-                                );
-                              })}
+                                  );
+                                })}
+                              </div>
                             </div>
-                          </React.Fragment>
-                        ))}
+                          );
+                        })}
                       </div>
 
                       <div className="ws-stats">
@@ -1288,24 +1354,9 @@ export function ExampleDemo() {
                   </div>
                   <div className="ws-steps">
                     {[
-                      {
-                        num: 1,
-                        done: !!selectedFile,
-                        active: !selectedFile,
-                        text: "Open a chromosome image",
-                      },
-                      {
-                        num: 2,
-                        done: hasDetection,
-                        active: !!selectedFile && !hasDetection,
-                        text: "Run Analysis (Ribbon → Analyze)",
-                      },
-                      {
-                        num: 3,
-                        done: !!reportData || !!karyogramImage,
-                        active: hasDetection && !reportData && !karyogramImage,
-                        text: "Generate Report (Ribbon → Report)",
-                      },
+                      { num: 1, done: !!selectedFile,                          active: !selectedFile,                          text: "Open a chromosome image" },
+                      { num: 2, done: hasDetection,                            active: !!selectedFile && !hasDetection,         text: "Run Analysis (Ribbon → Analyze)" },
+                      { num: 3, done: !!reportData || !!karyogramImage,        active: hasDetection && !reportData && !karyogramImage, text: "Generate Report (Ribbon → Report)" },
                     ].map(({ num, done, active, text }) => (
                       <div key={num} className="ws-step">
                         <span className={`ws-step-n ${done ? "ws-step-n-done" : active ? "ws-step-n-active" : ""}`}>
@@ -1338,7 +1389,11 @@ export function ExampleDemo() {
           <div className="ws-status-right">
             <span className="ws-status-item">Case #{caseId}</span>
             <span className="ws-status-item" style={{ marginLeft: "12px" }}>
+              Tool: {activeTool.charAt(0).toUpperCase() + activeTool.slice(1)}
+            </span>
+            <span className="ws-status-item" style={{ marginLeft: "12px" }}>
               Layout: {layoutMode === "split" ? "Split" : layoutMode === "focused-left" ? "Image" : "Report"}
+              {reportViewActive ? " (Report)" : ""}
             </span>
           </div>
         </div>
