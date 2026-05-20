@@ -2,11 +2,9 @@ import React, { useEffect, useMemo, useState, useCallback, useRef } from "react"
 import UTIF from "utif";
 import { useNavigate } from "react-router-dom";
 
-
 // ─── Config ────────────────────────────────────────────────────────────────────
-//const BASE_URL = "https://karyotyping-api-875244011562.asia-south1.run.app";
-//const BASE_URL = "http://localhost:8000";
-const BASE_URL = "http://localhost:8080";
+const BASE_URL = "https://karyotyping-api-875244011562.asia-south1.run.app";
+//const BASE_URL = "http://localhost:8080";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 type Tool = "select" | "cut" | "erase" | "extend" | "merge";
@@ -477,13 +475,6 @@ export function OnlineKaryotyping() {
   useEffect(() => () => { revokeBlob(preview); }, [preview]);
   useEffect(() => () => { revokeBlob(resultImage); }, [resultImage]);
   useEffect(() => () => { revokeBlob(karyogramImage); }, [karyogramImage]);
-
-  // ── Auto-generate report when detection completes ──────────────────────────────
-  useEffect(() => {
-    if (hasDetection && !loading && selectedFile) {
-      generateReport();
-    }
-  }, [hasDetection, selectedFile]);
 
   // ── Canvas click handler ─────────────────────────────────────────────────────
   const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1148,6 +1139,8 @@ export function OnlineKaryotyping() {
           img.onload = () => drawPolygons(img);
           img.src = preview;
         }
+        // Automatically generate report after successful analysis
+        setTimeout(() => generateReport(), 0);
       } else {
         setErrorMsg("No chromosomes detected");
         setStatusMsg("Detection complete — no chromosomes found.");

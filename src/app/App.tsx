@@ -9,7 +9,7 @@ import { Footer } from "./components/Footer";
 import { Navbar } from "./components/Navbar";
 import ContactFormPage from "./pages/ContactFormPage";
 import DemoVideo from "./pages/DemoVideo";
-import { ExampleDemo } from "./pages/exampleDemo";
+import { OnlineKaryotyping } from "./pages/OnlineKaryotyping";
 
 function HomePage() {
   return (
@@ -28,8 +28,8 @@ function HomePage() {
 function Layout() {
   const location = useLocation();
 
-  // hide navbar only for /example
-  const hideNavbar = location.pathname === "/example";
+  // hide navbar only for /online-karyotyping
+  const hideNavbar = location.pathname === "/online-karyotyping";
 
   return (
     <>
@@ -39,7 +39,7 @@ function Layout() {
         <Route path="/" element={<HomePage />} />
         <Route path="/demo" element={<ContactFormPage />} />
         <Route path="/video" element={<DemoVideo />} />
-        <Route path="/example" element={<ExampleDemo />} />
+        <Route path="/online-karyotyping" element={<OnlineKaryotyping />} />
       </Routes>
     </>
   );
