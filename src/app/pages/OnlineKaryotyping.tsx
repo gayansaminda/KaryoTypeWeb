@@ -5,9 +5,9 @@ import { useNavigate } from "react-router-dom";
 // ─── Config ────────────────────────────────────────────────────────────────────
 const BASE_URL = "https://karyotyping-api-875244011562.asia-south1.run.app";
 //const BASE_URL = "http://localhost:8080";
-
+//const BASE_URL = "http://localhost:8000";
 // ─── Types ─────────────────────────────────────────────────────────────────────
-type Tool = "select" | "cut" | "erase" | "extend" | "merge";
+type Tool = "select" | "cut" | "erase" | "extend" | "merge" | "add";
 type LayoutMode = "full-left" | "prioritized-left" | "equal-Portion" | "full-Right" | "prioritized-Right";
 
 interface DetectedPoint {
@@ -52,6 +52,13 @@ const CHROMOSOME_ROWS = [
   ["19", "20", "21", "22", "X", "Y"],
 ];
 
+const CHR_TYPES = [
+  { label: "Not Set", value: 0 },
+  ...Array.from({ length: 22 }, (_, i) => ({ label: (i + 1).toString(), value: i + 1 })),
+  { label: "X", value: 23 },
+  { label: "Y", value: 24 },
+];
+
 const NORMALIZE_CHR_KEY: Record<string, string> = {
   "23": "X", "24": "Y", "x": "X", "y": "Y",
 };
@@ -66,28 +73,32 @@ function normalizeChromosomeImages(raw: Record<string, string>): Record<string, 
   return out;
 }
 
-const RIBBON_TOOLS: { id: Tool; label: string; icon: string }[] = [
-  { id: "select", label: "Select", icon: "⊹" },
-  { id: "cut",    label: "Cut",    icon: "✂" },
-  { id: "erase",  label: "Erase",  icon: "◫" },
-  { id: "extend", label: "Extend", icon: "⤢" },
-  { id: "merge",  label: "Merge",  icon: "⊕" },
-];
-
 const SVG = {
   close:      <svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="1" x2="9" y2="9" stroke="currentColor" strokeWidth="1.4"/><line x1="9" y1="1" x2="1" y2="9" stroke="currentColor" strokeWidth="1.4"/></svg>,
-  folder:     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 7h4l2-2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"/></svg>,
-  run:        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>,
-  report:     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><polyline points="14 2 14 8 20 8"/></svg>,
-  print:      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeJoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>,
+  folder:     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 7h4l2-2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2z"/></svg>,
+  run:        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>,
+  report:     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/><polyline points="14 2 14 8 20 8"/></svg>,
+  print:      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>,
   dna:        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M5 3c0 0 2 2 2 5s-2 5-2 5 2 2 2 5-2 5-2 5"/><path d="M19 3c0 0-2 2-2 5s2 5 2 5-2 2-2 5 2 5 2 5"/><line x1="7" y1="8" x2="17" y2="8"/><line x1="7" y1="16" x2="17" y2="16"/></svg>,
   check:      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>,
   upload:     <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>,
   warn:       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>,
-  info:       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
-  layout:     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>,
-  undo:       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>,
+  info:       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+  layout:     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>,
+  undo:       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg>,
+  delete:     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>,
+  eraser:     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.9-9.9c1-1 2.5-1 3.4 0l4.3 4.3c1 1 1 2.5 0 3.4l-9.9 9.9c-1 1-2.5 1-3.4 0Z"/><path d="m22 21H8.8"/><path d="M18 11l-4.7 4.7"/></svg>,
+  add:        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
 };
+
+const RIBBON_TOOLS: { id: Tool; label: string; icon: React.ReactNode }[] = [
+  { id: "select", label: "Select", icon: "⊹" },
+  { id: "cut",    label: "Cut",    icon: "✂" },
+  { id: "erase",  label: "Erase",  icon: SVG.eraser },
+  { id: "extend", label: "Extend", icon: "⤢" },
+  { id: "merge",  label: "Merge",  icon: "⊕" },
+  { id: "add",    label: "Add",    icon: SVG.add },
+];
 
 function WinSpinner() {
   return (
@@ -208,6 +219,118 @@ function getPolygonArea(polygon: Array<[number, number]>): number {
   return Math.abs(area) / 2;
 }
 
+/**
+ * Simplifies a polygon using the Ramer-Douglas-Peucker algorithm.
+ */
+function simplifyPolygon(points: Array<[number, number]>, epsilon: number): Array<[number, number]> {
+  if (points.length <= 2) return points;
+
+  let maxDist = 0;
+  let index = 0;
+  const end = points.length - 1;
+
+  for (let i = 1; i < end; i++) {
+    const d = pointToLineDistance({ x: points[i][0], y: points[i][1] }, 
+                                  { x: points[0][0], y: points[0][1] }, 
+                                  { x: points[end][0], y: points[end][1] });
+    if (d > maxDist) {
+      index = i;
+      maxDist = d;
+    }
+  }
+
+  if (maxDist > epsilon) {
+    const res1 = simplifyPolygon(points.slice(0, index + 1), epsilon);
+    const res2 = simplifyPolygon(points.slice(index), epsilon);
+    return [...res1.slice(0, res1.length - 1), ...res2];
+  } else {
+    return [points[0], points[end]];
+  }
+}
+
+/**
+ * Traces the boundary of black pixels on a white canvas.
+ * Uses Moore-Neighbor Tracing algorithm.
+ */
+function traceContour(ctx: CanvasRenderingContext2D, width: number, height: number): Array<[number, number]> {
+  const imgData = ctx.getImageData(0, 0, width, height);
+  const data = imgData.data;
+  const threshold = 128; // Standard midpoint to prevent dilation/erosion over multiple rounds
+
+  // Find first black pixel (assuming black is < 128 in any channel)
+  let startX = -1, startY = -1;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 4;
+      if (data[idx] < threshold) { 
+        startX = x; startY = y;
+        break;
+      }
+    }
+    if (startX !== -1) break;
+  }
+
+  if (startX === -1) return [];
+
+  const points: Array<[number, number]> = [];
+  let currX = startX, currY = startY;
+  let prevX = startX - 1, prevY = startY;
+
+  const neighbors = [
+    [-1, -1], [0, -1], [1, -1],
+    [1, 0],   [1, 1],  [0, 1],
+    [-1, 1],  [-1, 0]
+  ];
+
+  const isBlack = (x: number, y: number) => {
+    if (x < 0 || x >= width || y < 0 || y >= height) return false;
+    return data[(y * width + x) * 4] < threshold;
+  };
+
+  // Limit iterations to prevent infinite loops on complex shapes
+  for (let iter = 0; iter < width * height; iter++) {
+    points.push([currX, currY]);
+
+    // Find direction from curr back to prev
+    let startDir = 0;
+    for (let i = 0; i < 8; i++) {
+      if (currX + neighbors[i][0] === prevX && currY + neighbors[i][1] === prevY) {
+        startDir = i;
+        break;
+      }
+    }
+
+    // Clockwise search for next black neighbor
+    let found = false;
+    for (let i = 1; i <= 8; i++) {
+      const dir = (startDir + i) % 8;
+      const nextX = currX + neighbors[dir][0];
+      const nextY = currY + neighbors[dir][1];
+
+      if (isBlack(nextX, nextY)) {
+        prevX = currX; prevY = currY;
+        currX = nextX; currY = nextY;
+        found = true;
+        break;
+      }
+    }
+
+    if (!found || (currX === startX && currY === startY)) break;
+  }
+
+  return points;
+}
+
+function rasterizePolygon(ctx: CanvasRenderingContext2D, polygon: Array<[number, number]>) {
+  if (polygon.length < 3) return;
+  ctx.fillStyle = "black";
+  ctx.beginPath();
+  ctx.moveTo(polygon[0][0], polygon[0][1]);
+  for (let i = 1; i < polygon.length; i++) ctx.lineTo(polygon[i][0], polygon[i][1]);
+  ctx.closePath();
+  ctx.fill();
+}
+
 export function OnlineKaryotyping() {
   const [selectedFile, setSelectedFile]             = useState<File | null>(null);
   const [preview, setPreview]                       = useState<string | null>(null);
@@ -217,6 +340,7 @@ export function OnlineKaryotyping() {
   const [loading, setLoading]                       = useState(false);
   const [loadingPhase, setLoadingPhase]             = useState<"analysis" | "report" | null>(null);
   const [activeTool, setActiveTool]                 = useState<Tool>("select");
+  const [markDetected, setMarkDetected]             = useState(true);
   const [dragOver, setDragOver]                     = useState(false);
   const [statusMsg, setStatusMsg]                   = useState("Ready");
   const [errorMsg, setErrorMsg]                     = useState<string | null>(null);
@@ -236,6 +360,12 @@ export function OnlineKaryotyping() {
   const [historyIndex, setHistoryIndex]             = useState(-1);
   const [selectedPolygonForMerge, setSelectedPolygonForMerge] = useState<number | null>(null);
   const [extendStarted, setExtendStarted]           = useState(false);
+  const [drawingCircleRadius]                       = useState(6);
+  const [isDrawingRaster, setIsDrawingRaster]       = useState(false);
+  const [isDrawingExtend, setIsDrawingExtend]       = useState(false);
+  const [extendStartPoint, setExtendStartPoint]     = useState<Point | null>(null);
+  const [previewPolygon, setPreviewPolygon]         = useState<Array<[number, number]> | null>(null);
+
   const [lastInsertedIndex, setLastInsertedIndex]   = useState<number | null>(null);
   const [cutStartPoint, setCutStartPoint]           = useState<Point | null>(null);
   const [mousePos, setMousePos]                     = useState<Point | null>(null);
@@ -245,14 +375,18 @@ export function OnlineKaryotyping() {
   const [showHowItWorks, setShowHowItWorks]         = useState(false);
   const [karyogramBoundingBoxes, setKaryogramBoundingBoxes] = useState<BoundingBox[]>([]);
   const [selectedKaryogramRegion, setSelectedKaryogramRegion] = useState<number | null>(null);
+  const [contextMenu, setContextMenu]               = useState<{ x: number; y: number } | null>(null);
+  const [showTypeSubmenu, setShowTypeSubmenu]       = useState(false);
 
-  const canvasRef          = useRef<HTMLCanvasElement>(null);
+  const [imgSize, setImgSize]                       = useState({ w: 0, h: 0 });
+  const svgRef             = useRef<SVGSVGElement>(null);
   const karyogramCanvasRef = useRef<HTMLCanvasElement>(null);
   const loadedImageRef     = useRef<HTMLImageElement | null>(null);
   const karyogramImageRef  = useRef<HTMLImageElement | null>(null);
   const fileInputRef       = useRef<HTMLInputElement>(null);
   const imageAreaRef       = useRef<HTMLDivElement>(null);
   const karyogramAreaRef   = useRef<HTMLDivElement>(null);
+  const virtualCanvasRef   = useRef<HTMLCanvasElement | null>(null);
   const navigate           = useNavigate();
   const caseId             = "105123";
 
@@ -282,6 +416,18 @@ export function OnlineKaryotyping() {
       return newHistory;
     });
   }, [historyIndex]);
+
+  const deleteSelectedChromosome = useCallback(() => {
+    if (selectedChromosomeArea === null) return;
+    const newAreas = [...DetectedChromosomeAreas];
+    newAreas.splice(selectedChromosomeArea, 1);
+    setDetectedChromosomeAreas(newAreas);
+    saveToHistory(newAreas);
+    setSelectedChromosomeArea(null);
+    setSelectedKaryogramRegion(null);
+    setBoundingPolygonsSynced(false);
+    setStatusMsg("Deleted chromosome area");
+  }, [selectedChromosomeArea, DetectedChromosomeAreas, saveToHistory]);
 
   const undoLastAction = useCallback(() => {
     if (historyIndex > 0) {
@@ -344,48 +490,6 @@ export function OnlineKaryotyping() {
   useEffect(() => () => { revokeBlob(karyogramImage); }, [karyogramImage]);
 
   // ── Draw main image polygons ─────────────────────────────────────────────────
-  const drawPolygons = useCallback((imageElement: HTMLImageElement) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    canvas.width  = imageElement.width;
-    canvas.height = imageElement.height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    DetectedChromosomeAreas.forEach((detection, index) => {
-      const polygon = detection.polygon;
-      if (!polygon.length) return;
-      const isSelected     = selectedChromosomeArea === index;
-      const isMergeSelected = selectedPolygonForMerge === index;
-      const hue = detection.colorHue ?? (index * 360) / DetectedChromosomeAreas.length;
-      ctx.strokeStyle = isMergeSelected
-        ? `hsla(0,100%,50%,${isSelected ? 1 : 0.5})`
-        : `hsla(${hue},100%,50%,${isSelected ? 1 : 0.5})`;
-      ctx.lineWidth  = isSelected || isMergeSelected ? 4 : 1;
-      ctx.fillStyle  = `hsla(${hue},0%,50%,0.05)`;
-      ctx.beginPath();
-      ctx.moveTo(polygon[0][0], polygon[0][1]);
-      for (let i = 1; i < polygon.length; i++) ctx.lineTo(polygon[i][0], polygon[i][1]);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-    });
-
-    const lineToDraw = cutStartPoint && mousePos ? { p1: cutStartPoint, p2: mousePos } : lastCutLine;
-    if (lineToDraw && activeTool === "cut") {
-      ctx.save();
-      ctx.setLineDash([5, 5]);
-      ctx.strokeStyle = "red";
-      ctx.lineWidth   = 2;
-      ctx.beginPath();
-      ctx.moveTo(lineToDraw.p1.x, lineToDraw.p1.y);
-      ctx.lineTo(lineToDraw.p2.x, lineToDraw.p2.y);
-      ctx.stroke();
-      ctx.restore();
-    }
-  }, [DetectedChromosomeAreas, selectedChromosomeArea, selectedPolygonForMerge, cutStartPoint, mousePos, lastCutLine, activeTool]);
-
   // ── Draw karyogram bounding boxes ────────────────────────────────────────────
   // Mirrors drawPolygons exactly: canvas is sized to the IMAGE's natural dimensions,
   // overlaid on top of the image inside the same transform div.
@@ -452,25 +556,26 @@ export function OnlineKaryotyping() {
   useEffect(() => {
     if (displayImage) {
       const img  = new Image();
-      img.onload = () => { loadedImageRef.current = img; drawPolygons(img); };
+      img.onload = () => { 
+        loadedImageRef.current = img; 
+        setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
+      };
       img.src    = displayImage;
     } else {
       loadedImageRef.current = null;
+      setImgSize({ w: 0, h: 0 });
     }
-  }, [displayImage, drawPolygons]);
-
-  useEffect(() => {
-    if (loadedImageRef.current) drawPolygons(loadedImageRef.current);
-  }, [DetectedChromosomeAreas, selectedChromosomeArea, selectedPolygonForMerge, cutStartPoint, mousePos, lastCutLine, activeTool, drawPolygons]);
+  }, [displayImage]);
 
   // ── Main canvas click ────────────────────────────────────────────────────────
-  const handleCanvasClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasClick = (event: React.MouseEvent<SVGSVGElement>) => {
     if (hasDragged) { setHasDragged(false); return; }
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x    = ((event.clientX - rect.left) / rect.width)  * canvas.width;
-    const y    = ((event.clientY - rect.top)  / rect.height) * canvas.height;
+    const svg = svgRef.current;
+    if (!svg) return;
+    const pt = svg.createSVGPoint();
+    pt.x = event.clientX;
+    pt.y = event.clientY;
+    const { x, y } = pt.matrixTransform(svg.getScreenCTM()?.inverse());
     const clickPoint = { x, y };
 
     if (activeTool === "cut") {
@@ -505,62 +610,12 @@ export function OnlineKaryotyping() {
       return;
     }
 
-    if (activeTool === "erase" && selectedChromosomeArea !== null) {
-      const area    = DetectedChromosomeAreas[selectedChromosomeArea];
-      const erased  = erasePolygon(area.polygon, clickPoint);
-      const newAreas = [...DetectedChromosomeAreas];
-      newAreas.splice(selectedChromosomeArea, 1, ...erased.map(polygon => ({ ...area, polygon })));
-      setDetectedChromosomeAreas(newAreas);
-      saveToHistory(newAreas);
-      setSelectedChromosomeArea(null);
-      setBoundingPolygonsSynced(false);
-      setStatusMsg("Erased area from polygon");
+    if (activeTool === "erase") {
       return;
     }
 
     if (activeTool === "extend") {
-      let hitIndex: number | null = null;
-      for (let i = 0; i < DetectedChromosomeAreas.length; i++)
-        if (isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) { hitIndex = i; break; }
-
-      if (!extendStarted) {
-        if (hitIndex !== null) {
-          setSelectedChromosomeArea(hitIndex);
-          setStatusMsg(`Extend: selected chromosome ${hitIndex + 1}. Click outside to extend.`);
-        } else if (selectedChromosomeArea !== null) {
-          const polygon = DetectedChromosomeAreas[selectedChromosomeArea].polygon;
-          let minDist = Infinity, closestIdx = -1;
-          for (let i = 0; i < polygon.length; i++) {
-            const d = Math.sqrt((polygon[i][0] - x) ** 2 + (polygon[i][1] - y) ** 2);
-            if (d < minDist) { minDist = d; closestIdx = i; }
-          }
-          if (closestIdx !== -1) {
-            const newPolygon = [...polygon];
-            newPolygon.splice(closestIdx + 1, 0, [x, y]);
-            const newAreas = [...DetectedChromosomeAreas];
-            newAreas[selectedChromosomeArea] = { ...newAreas[selectedChromosomeArea], polygon: newPolygon };
-            setDetectedChromosomeAreas(newAreas);
-            saveToHistory(newAreas);
-            setBoundingPolygonsSynced(false);
-            setExtendStarted(true);
-            setLastInsertedIndex(closestIdx + 1);
-            setStatusMsg(`Extend: started on chromosome ${selectedChromosomeArea + 1}.`);
-          }
-        } else {
-          setStatusMsg("Extend: click inside a polygon first.");
-        }
-      } else if (selectedChromosomeArea !== null && lastInsertedIndex !== null) {
-        const polygon    = DetectedChromosomeAreas[selectedChromosomeArea].polygon;
-        const newPolygon = [...polygon];
-        newPolygon.splice(lastInsertedIndex + 1, 0, [x, y]);
-        const newAreas   = [...DetectedChromosomeAreas];
-        newAreas[selectedChromosomeArea] = { ...newAreas[selectedChromosomeArea], polygon: newPolygon };
-        setDetectedChromosomeAreas(newAreas);
-        saveToHistory(newAreas);
-        setBoundingPolygonsSynced(false);
-        setLastInsertedIndex(lastInsertedIndex + 1);
-        setStatusMsg(`Extend: added point to chromosome ${selectedChromosomeArea + 1}.`);
-      }
+      // Original point insertion logic disabled in favor of new raster extension
       return;
     }
 
@@ -597,18 +652,150 @@ export function OnlineKaryotyping() {
     }
   };
 
-  const handleCanvasMouseDown = (event: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasMouseDown = (event: React.MouseEvent<SVGSVGElement>) => {
     setHasDragged(false);
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x    = ((event.clientX - rect.left) / rect.width)  * canvas.width;
-    const y    = ((event.clientY - rect.top)  / rect.height) * canvas.height;
-    const hit  = DetectedChromosomeAreas.some(a => isPointInPolygon([x, y], a.polygon));
-    if (!hit) { setIsPanning("main"); setPanStart({ x: event.clientX, y: event.clientY }); }
+    const svg = svgRef.current;
+    if (!svg) return;
+    const pt = svg.createSVGPoint();
+    pt.x = event.clientX;
+    pt.y = event.clientY;
+    const { x, y } = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+
+    if (activeTool === "extend" || activeTool === "erase" || activeTool === "add") {
+      let hitIndex = -1;
+      for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
+        if (isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
+          hitIndex = i;
+          break;
+        }
+      }
+
+      let targetArea = selectedChromosomeArea;
+
+      // If we hit a DIFFERENT polygon, update selection first
+      if (activeTool !== "add" && hitIndex !== -1 && hitIndex !== selectedChromosomeArea) {
+        targetArea = hitIndex;
+        setSelectedChromosomeArea(hitIndex);
+        if (boundingPolygonsSynced) {
+          const idx = karyogramBoundingBoxes.findIndex(b => b.image_index === hitIndex);
+          if (idx >= 0) setSelectedKaryogramRegion(idx);
+        }
+        setStatusMsg(`Selected chromosome ${hitIndex + 1}`);
+      }
+
+      if (activeTool === "add" || targetArea !== null) {
+        // Initialize Virtual Canvas
+        const img = loadedImageRef.current;
+        if (!img) return;
+        const vCanvas = document.createElement("canvas");
+        vCanvas.width = img.width;
+        vCanvas.height = img.height;
+        const vCtx = vCanvas.getContext("2d");
+        if (!vCtx) return;
+
+        // Fill White
+        vCtx.fillStyle = "white";
+        vCtx.fillRect(0, 0, vCanvas.width, vCanvas.height);
+
+        // Draw Current Polygon Black
+        if (activeTool !== "add" && targetArea !== null) {
+          rasterizePolygon(vCtx, DetectedChromosomeAreas[targetArea].polygon);
+        }
+
+        virtualCanvasRef.current = vCanvas;
+        setIsDrawingRaster(true);
+        setExtendStartPoint({ x, y });
+
+        // Draw initial circle (black for add/extend, white for erase)
+        vCtx.fillStyle = activeTool === "erase" ? "white" : "black";
+        vCtx.beginPath();
+        vCtx.arc(x, y, drawingCircleRadius, 0, Math.PI * 2);
+        vCtx.fill();
+        return;
+      }
+    }
+
+    let hit = false;
+    for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
+      if (isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) { 
+      setIsPanning("main"); 
+      setPanStart({ x: event.clientX, y: event.clientY }); 
+    }
   };
 
-  const handleMouseMove = (event: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleCanvasMouseUp = (event: React.MouseEvent<SVGSVGElement>) => {
+    if ((activeTool === "extend" || activeTool === "erase" || activeTool === "add") && isDrawingRaster && virtualCanvasRef.current) {
+      const svg = svgRef.current;
+      if (!svg) return;
+      const pt = svg.createSVGPoint();
+      pt.x = event.clientX;
+      pt.y = event.clientY;
+      const { x, y } = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+
+      const vCanvas = virtualCanvasRef.current;
+      const vCtx = vCanvas.getContext("2d");
+      if (vCtx && extendStartPoint) {
+        // Draw End Circle and connecting line (black for add/extend, white for erase)
+        const paintColor = activeTool === "erase" ? "white" : "black";
+        vCtx.fillStyle = paintColor;
+        vCtx.strokeStyle = paintColor;
+        vCtx.lineWidth = drawingCircleRadius * 2;
+        vCtx.lineCap = "round";
+
+        vCtx.beginPath();
+        vCtx.arc(x, y, drawingCircleRadius, 0, Math.PI * 2);
+        vCtx.fill();
+
+        vCtx.beginPath();
+        vCtx.moveTo(extendStartPoint.x, extendStartPoint.y);
+        vCtx.lineTo(x, y);
+        vCtx.stroke();
+
+        // Trace new contour
+        let newPolygon = traceContour(vCtx, vCanvas.width, vCanvas.height);
+        if (newPolygon.length > 0) {
+          // Simplify with RDP (use smaller epsilon to prevent shrinking and detail loss)
+          newPolygon = simplifyPolygon(newPolygon, 0.5);
+          
+          if (activeTool === "add") {
+            const ys = newPolygon.map(p => p[1]), xs = newPolygon.map(p => p[0]);
+            const newArea: DetectedPoint = {
+              polygon: newPolygon,
+              score: 1.0,
+              bbox: [Math.min(...ys), Math.min(...xs), Math.max(...ys), Math.max(...xs)],
+              colorHue: (DetectedChromosomeAreas.length * 137.5) % 360 // Use golden angle for color distribution
+            };
+            const newAreas = [...DetectedChromosomeAreas, newArea];
+            setDetectedChromosomeAreas(newAreas);
+            saveToHistory(newAreas);
+            setSelectedChromosomeArea(newAreas.length - 1);
+            setStatusMsg("New chromosome area added.");
+          } else if (selectedChromosomeArea !== null) {
+            const newAreas = [...DetectedChromosomeAreas];
+            newAreas[selectedChromosomeArea] = { ...newAreas[selectedChromosomeArea], polygon: newPolygon };
+            setDetectedChromosomeAreas(newAreas);
+            saveToHistory(newAreas);
+            setStatusMsg(activeTool === "extend" ? "Polygon extended." : "Polygon erased.");
+          }
+          setBoundingPolygonsSynced(false);
+        }
+      }
+    }
+    setIsDrawingRaster(false);
+    setPreviewPolygon(null);
+    setExtendStartPoint(null);
+    setIsPanning(null);
+  };
+
+  const handleMouseMove = (event: React.MouseEvent<SVGSVGElement>) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+
     if (isPanning === "main" && panStart) {
       const dx = event.clientX - panStart.x, dy = event.clientY - panStart.y;
       if (Math.abs(dx) > 2 || Math.abs(dy) > 2) setHasDragged(true);
@@ -616,14 +803,37 @@ export function OnlineKaryotyping() {
       setPanStart({ x: event.clientX, y: event.clientY });
       return;
     }
-    if (activeTool === "cut" && cutStartPoint) {
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
-      setMousePos({
-        x: ((event.clientX - rect.left) / rect.width)  * canvas.width,
-        y: ((event.clientY - rect.top)  / rect.height) * canvas.height,
-      });
+
+    const pt = svg.createSVGPoint();
+    pt.x = event.clientX;
+    pt.y = event.clientY;
+    const { x, y } = pt.matrixTransform(svg.getScreenCTM()?.inverse());
+
+    if (activeTool === "extend" || activeTool === "erase" || activeTool === "add" || (activeTool === "cut" && cutStartPoint)) {
+      setMousePos({ x, y });
+    }
+
+    if ((activeTool === "extend" || activeTool === "erase" || activeTool === "add") && isDrawingRaster && virtualCanvasRef.current) {
+      const vCtx = virtualCanvasRef.current.getContext("2d");
+      if (vCtx && extendStartPoint) {
+        const paintColor = activeTool === "erase" ? "white" : "black";
+        vCtx.fillStyle = paintColor;
+        vCtx.strokeStyle = paintColor;
+        vCtx.lineWidth = drawingCircleRadius * 2;
+        vCtx.lineCap = "round";
+
+        vCtx.beginPath();
+        vCtx.moveTo(extendStartPoint.x, extendStartPoint.y);
+        vCtx.lineTo(x, y);
+        vCtx.stroke();
+        
+        setExtendStartPoint({ x, y });
+
+        const previewPoints = traceContour(vCtx, virtualCanvasRef.current.width, virtualCanvasRef.current.height);
+        if (previewPoints.length > 0) {
+          setPreviewPolygon(simplifyPolygon(previewPoints, 1.5));
+        }
+      }
     }
   };
 
@@ -676,6 +886,130 @@ export function OnlineKaryotyping() {
     }
     setSelectedKaryogramRegion(null);
     setStatusMsg("Karyogram: no region at clicked point");
+  };
+
+  const handleKaryogramContextMenu = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    event.preventDefault();
+    const canvas = karyogramCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x    = ((event.clientX - rect.left) / rect.width)  * canvas.width;
+    const y    = ((event.clientY - rect.top)  / rect.height) * canvas.height;
+
+    let hitIdx = -1;
+    for (let i = 0; i < karyogramBoundingBoxes.length; i++) {
+      if (isPointInPolygon([x, y], karyogramBoundingBoxes[i].polygon)) {
+        hitIdx = i;
+        break;
+      }
+    }
+
+    if (hitIdx !== -1) {
+      setSelectedKaryogramRegion(hitIdx);
+      const bbox = karyogramBoundingBoxes[hitIdx];
+      if (boundingPolygonsSynced && bbox.image_index >= 0) setSelectedChromosomeArea(bbox.image_index);
+      setContextMenu({ x: event.clientX, y: event.clientY });
+    } else {
+      setContextMenu(null);
+    }
+  };
+
+  const handleKaryogramDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = karyogramCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x    = ((event.clientX - rect.left) / rect.width)  * canvas.width;
+    const y    = ((event.clientY - rect.top)  / rect.height) * canvas.height;
+
+    let hitIdx = -1;
+    for (let i = 0; i < karyogramBoundingBoxes.length; i++) {
+      if (isPointInPolygon([x, y], karyogramBoundingBoxes[i].polygon)) {
+        hitIdx = i;
+        break;
+      }
+    }
+
+    if (hitIdx !== -1) {
+      setSelectedKaryogramRegion(hitIdx);
+      const bbox = karyogramBoundingBoxes[hitIdx];
+      if (boundingPolygonsSynced && bbox.image_index >= 0) setSelectedChromosomeArea(bbox.image_index);
+      rotateChromosome(180, hitIdx);
+    }
+  };
+
+  const rotateChromosome = async (angle: number, targetIdx?: number) => {
+    const idx = targetIdx !== undefined ? targetIdx : selectedKaryogramRegion;
+    if (idx === null || !selectedFile || karyogramBoundingBoxes.length === 0) return;
+
+    // Get the specific bounding box
+    const bbox = karyogramBoundingBoxes[idx];
+
+    const fd = new FormData();
+    fd.append("boundingBoxIndex", bbox.image_index.toString());
+    fd.append("rotationAngle", angle.toString());
+
+    setLoading(true);
+    setLoadingPhase("report");
+    setStatusMsg("Rotating chromosome...");
+    setContextMenu(null);
+
+    try {
+      const res = await fetch(`${BASE_URL}/api/predict/rotateChromosome`, { method: "POST", body: fd });
+      if (!res.ok) {
+        setErrorMsg(`Rotation failed: ${await parseErrorDetail(res)}`);
+        setStatusMsg("Error: Rotation failed.");
+        return;
+      }
+      const raw = await res.json();
+      if (raw.image && raw.bounding_boxes) {
+        const imageDataUrl = raw.image.startsWith("data:") ? raw.image : `data:image/png;base64,${raw.image}`;
+        setKaryogramImage(imageDataUrl);
+        setKaryogramBoundingBoxes(raw.bounding_boxes);
+        setStatusMsg("Rotation complete.");
+      }
+    } catch (e: any) {
+      setErrorMsg(`Rotation failed: ${e?.message || "Network error"}`);
+      setStatusMsg("Error: could not reach the server.");
+    } finally {
+      setLoading(false); setLoadingPhase(null);
+    }
+  };
+
+  const setChromosomeType = async (type: number, targetIdx?: number) => {
+    const idx = targetIdx !== undefined ? targetIdx : selectedKaryogramRegion;
+    if (idx === null || !selectedFile || karyogramBoundingBoxes.length === 0) return;
+
+    const bbox = karyogramBoundingBoxes[idx];
+    const fd = new FormData();
+    fd.append("boundingBoxIndex", bbox.image_index.toString());
+    fd.append("newType", type.toString());
+
+    setLoading(true);
+    setLoadingPhase("report");
+    setStatusMsg("Setting chromosome type...");
+    setContextMenu(null);
+    setShowTypeSubmenu(false);
+
+    try {
+      const res = await fetch(`${BASE_URL}/api/predict/setChromosomeType`, { method: "POST", body: fd });
+      if (!res.ok) {
+        setErrorMsg(`Type update failed: ${await parseErrorDetail(res)}`);
+        setStatusMsg("Error: Type update failed.");
+        return;
+      }
+      const raw = await res.json();
+      if (raw.image && raw.bounding_boxes) {
+        const imageDataUrl = raw.image.startsWith("data:") ? raw.image : `data:image/png;base64,${raw.image}`;
+        setKaryogramImage(imageDataUrl);
+        setKaryogramBoundingBoxes(raw.bounding_boxes);
+        setStatusMsg("Type updated.");
+      }
+    } catch (e: any) {
+      setErrorMsg(`Type update failed: ${e?.message || "Network error"}`);
+      setStatusMsg("Error: could not reach the server.");
+    } finally {
+      setLoading(false); setLoadingPhase(null);
+    }
   };
 
   const handleKaryogramMouseDown = (event: React.MouseEvent<HTMLCanvasElement>) => {
@@ -769,7 +1103,6 @@ export function OnlineKaryotyping() {
         setHasDetection(true);
         setStatusMsg(`Detection complete — ${data.detections.length} chromosomes identified.`);
         saveToHistory(data.detections);
-        if (preview) { const img = new Image(); img.onload = () => drawPolygons(img); img.src = preview; }
         setTimeout(() => generateReport(), 0);
       } else {
         setErrorMsg("No chromosomes detected");
@@ -982,6 +1315,7 @@ export function OnlineKaryotyping() {
         .ws-status-dot-error { width:8px; height:8px; border-radius:50%; background:#d32f2f; }
         .ws-status-dot-warn  { width:8px; height:8px; border-radius:50%; background:#f0883e; }
         .hidden { display:none!important; }
+        .ws-context-item:hover { background:#f0f0f0; }
         .ws-print-header, .ws-print-footer { display:none; }
         @media print {
           @page { margin:1.5cm; }
@@ -1050,6 +1384,14 @@ export function OnlineKaryotyping() {
                 <span className="icon">{icon}</span>{label}
               </button>
             ))}
+            <button
+              className="ws-rbtn"
+              disabled={!selectedFile || selectedChromosomeArea === null}
+              onClick={deleteSelectedChromosome}
+              title="Delete selected chromosome area"
+            >
+              <span className="icon">{SVG.delete}</span>Delete
+            </button>
           </div>
           <div className="ws-ribbon-group">
             <button className="ws-rbtn" onClick={undoLastAction} disabled={historyIndex <= 0}>
@@ -1112,6 +1454,10 @@ export function OnlineKaryotyping() {
                   Image Viewer
                   {hasDetection && <span className="ws-detect-badge">{SVG.check}&nbsp;{DetectedChromosomeAreas.length} detected</span>}
                   {selectedChromosomeArea !== null && <span className="ws-detect-badge" style={{ background:"#cce4ff", color:"#0066cc" }}>Selected: #{selectedChromosomeArea + 1}</span>}
+                  <label style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "11px", fontWeight: "normal", cursor: "pointer", marginLeft: "12px", color: "#666" }}>
+                    <input type="checkbox" checked={markDetected} onChange={e => setMarkDetected(e.target.checked)} />
+                    Mark Detected Chromosomes
+                  </label>
                 </span>
                 <div className="ws-panel-actions">
                   <button className="ws-panel-act" onClick={() => fileInputRef.current?.click()}>{SVG.folder}</button>
@@ -1141,11 +1487,63 @@ export function OnlineKaryotyping() {
                     <img src={displayImage} alt="Chromosome spread" draggable={false}
                       style={{ maxWidth:"100%", maxHeight:"100%", objectFit:"contain" }}/>
                     {DetectedChromosomeAreas.length > 0 && (
-                      <canvas ref={canvasRef} className="ws-image-canvas"
+                      <svg
+                        ref={svgRef}
+                        viewBox={`0 0 ${imgSize.w} ${imgSize.h}`}
+                        className="ws-image-canvas"
                         onClick={handleCanvasClick}
                         onMouseDown={handleCanvasMouseDown}
+                        onMouseUp={handleCanvasMouseUp}
                         onMouseMove={handleMouseMove}
-                        onMouseLeave={() => setMousePos(null)}/>
+                        onMouseLeave={() => setMousePos(null)}
+                        style={{
+                          position: "absolute", top: "50%", left: "50%",
+                          transform: "translate(-50%, -50%)", maxWidth: "100%", maxHeight: "100%",
+                          width: imgSize.w || 'auto', height: imgSize.h || 'auto',
+                          display: "block", pointerEvents: "auto", objectFit: "contain"
+                        }}
+                      >
+                        {DetectedChromosomeAreas.map((detection, index) => {
+                          const isSelected = selectedChromosomeArea === index;
+                          const isMergeSelected = selectedPolygonForMerge === index;
+
+                          if (!markDetected && !isSelected && !isMergeSelected) return null;
+
+                          const hue = detection.colorHue ?? (index * 360) / DetectedChromosomeAreas.length;
+                          return (
+                            <polygon
+                              key={index}
+                              points={detection.polygon.map(p => `${p[0]},${p[1]}`).join(" ")}
+                            fill={isSelected ? "rgba(0, 102, 204, 0.15)" : `hsla(${hue}, 0%, 50%, 0.05)`}
+                            stroke={isSelected ? "#0066cc" : (isMergeSelected ? `hsla(0,100%,50%,0.5)` : `hsla(${hue},100%,50%,0.5)`)}
+                              strokeWidth={isSelected || isMergeSelected ? 2 : 1}
+                              style={{ cursor: "pointer" }}
+                            />
+                          );
+                        })}
+                        {previewPolygon && (
+                          <polygon
+                            points={previewPolygon.map(p => `${p[0]},${p[1]}`).join(" ")}
+                            fill="hsla(210, 100%, 50%, 0.2)"
+                            stroke="#0066cc"
+                            strokeWidth="2"
+                            strokeDasharray="4,2"
+                            style={{ pointerEvents: "none" }}
+                          />
+                        )}
+                        {(activeTool === "extend" || activeTool === "erase" || activeTool === "add") && mousePos && (activeTool === "add" || selectedChromosomeArea !== null) && (
+                          <circle cx={mousePos.x} cy={mousePos.y} r={drawingCircleRadius} fill="rgba(0, 102, 204, 0.1)" stroke="rgba(0, 102, 204, 0.8)" strokeWidth="2" style={{ pointerEvents: "none" }} />
+                        )}
+                        {(() => {
+                          const lineToDraw = cutStartPoint && mousePos ? { p1: cutStartPoint, p2: mousePos } : lastCutLine;
+                          if (lineToDraw && activeTool === "cut") {
+                            return (
+                              <line x1={lineToDraw.p1.x} y1={lineToDraw.p1.y} x2={lineToDraw.p2.x} y2={lineToDraw.p2.y} stroke="red" strokeWidth="2" strokeDasharray="5,5" style={{ pointerEvents: "none" }} />
+                            );
+                          }
+                          return null;
+                        })()}
+                      </svg>
                     )}
                   </div>
                 ) : (
@@ -1207,6 +1605,8 @@ export function OnlineKaryotyping() {
                           {hasBoundingBoxes && (
                             <canvas ref={karyogramCanvasRef} className="ws-image-canvas"
                               onClick={handleKaryogramCanvasClick}
+                              onDoubleClick={handleKaryogramDoubleClick}
+                              onContextMenu={handleKaryogramContextMenu}
                               onMouseDown={handleKaryogramMouseDown}
                               onMouseMove={handleKaryogramMouseMove}
                               onMouseLeave={() => {}}/>
@@ -1335,6 +1735,57 @@ export function OnlineKaryotyping() {
                   </button>
                 </div>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── Context Menu ── */}
+        {contextMenu && (
+          <div 
+            style={{ position:"fixed", top:contextMenu.y, left:contextMenu.x, zIndex:2000, background:"#fff", border:"1px solid #ccc", boxShadow:"2px 2px 5px rgba(0,0,0,0.2)", borderRadius:"4px", padding:"4px 0", minWidth:"120px" }}
+            onMouseLeave={() => { setContextMenu(null); setShowTypeSubmenu(false); }}
+          >
+            <div className="ws-context-item" style={{ padding:"6px 12px", cursor:"pointer", fontSize:"13px" }}
+                 onClick={() => {
+                   const angle = window.prompt("Enter rotation angle (degrees):", "180");
+                   if (angle !== null) {
+                     const num = parseFloat(angle);
+                     if (!isNaN(num)) rotateChromosome(num);
+                   }
+                   setContextMenu(null);
+                 }}>
+              Rotate
+            </div>
+
+            {/* Set Type Menu Item with Submenu */}
+            <div className="ws-context-item" 
+                 style={{ padding:"6px 12px", cursor:"pointer", fontSize:"13px", position: "relative", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                 onMouseEnter={() => setShowTypeSubmenu(true)}>
+              <span>Set Type</span>
+              <span style={{ fontSize: "10px", marginLeft: "8px" }}>▶</span>
+              
+              {showTypeSubmenu && (
+                <div style={{ 
+                  position: "absolute", 
+                  left: "100%", 
+                  top: "-4px", 
+                  background: "#fff", 
+                  border: "1px solid #ccc", 
+                  boxShadow: "2px 2px 5px rgba(0,0,0,0.2)", 
+                  borderRadius: "4px", 
+                  padding: "4px 0", 
+                  minWidth: "100px", 
+                  maxHeight: "250px", 
+                  overflowY: "auto" 
+                }}>
+                  {CHR_TYPES.map(t => (
+                    <div key={t.value} className="ws-context-item" style={{ padding: "6px 12px", cursor: "pointer", fontSize: "13px" }}
+                         onClick={(e) => { e.stopPropagation(); setChromosomeType(t.value); }}>
+                      {t.label}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         )}
