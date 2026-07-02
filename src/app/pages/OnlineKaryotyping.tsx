@@ -105,6 +105,10 @@ function classIdToType(classId: string | number): number {
   return 0;
 }
 
+const pointerDistance = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+  Math.hypot(a.x - b.x, a.y - b.y);
+const clampScale = (s: number) => Math.max(0.2, Math.min(10, s));
+
 // Parses the backend's Class_Area_Boxes (list of single-key {class_name: rect}).
 function parseClassAreaBoxes(raw: any): ClassAreaBox[] {
   if (!Array.isArray(raw)) return [];
@@ -538,8 +542,23 @@ export function OnlineKaryotyping() {
   const virtualCanvasRef   = useRef<HTMLCanvasElement | null>(null);
   const extendSeedRef      = useRef<[number, number] | null>(null);
   const chromDragRef       = useRef<{ boxIndex: number; imageIndex: number; type: number; startX: number; startY: number; moved: boolean } | null>(null);
+  // Two-finger pinch-zoom tracking (per surface). pinching = true suppresses the
+  // single-finger pan/draw handlers so a pinch never drives the pan logic.
+  const mainPointersRef    = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const mainPinchRef       = useRef<{ startDist: number; startScale: number } | null>(null);
+  const mainPinchingRef    = useRef(false);
+  const karyoPointersRef   = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const karyoPinchRef      = useRef<{ startDist: number; startScale: number } | null>(null);
+  const karyoPinchingRef   = useRef(false);
   const navigate           = useNavigate();
   const caseId             = "105123";
+
+  // Live mirrors of the zoom levels so pinch handlers read the current value
+  // without stale closures.
+  const scaleRef          = useRef(scale);
+  const karyogramScaleRef = useRef(karyogramScale);
+  scaleRef.current = scale;
+  karyogramScaleRef.current = karyogramScale;
 
   // ── SEO Initialization ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -830,6 +849,14 @@ export function OnlineKaryotyping() {
   };
 
   const handleCanvasMouseDown = (event: React.PointerEvent<SVGSVGElement>) => {
+    // A second touch means a pinch is starting — abandon any single-finger
+    // pan/draw so the pinch can take over cleanly.
+    if (event.pointerType === "touch" && mainPointersRef.current.size >= 1) {
+      mainPinchingRef.current = true;
+      setIsPanning(null); setPanStart(null);
+      setIsDrawingRaster(false); setPreviewPolygon(null); setExtendStartPoint(null);
+      return;
+    }
     setHasDragged(false);
     // Keep receiving move/up events even if the finger/cursor leaves the SVG.
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
@@ -1017,6 +1044,7 @@ export function OnlineKaryotyping() {
   };
 
   const handleMouseMove = (event: React.PointerEvent<SVGSVGElement>) => {
+    if (mainPinchingRef.current) return; // a pinch owns the gesture
     const svg = svgRef.current;
     if (!svg) return;
 
@@ -1065,6 +1093,34 @@ export function OnlineKaryotyping() {
         }
       }
     }
+  };
+
+  // ── Pinch-to-zoom on the main image area (touch) ─────────────────────────────
+  const handleMainAreaPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    mainPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (mainPointersRef.current.size === 2) {
+      const [a, b] = [...mainPointersRef.current.values()];
+      mainPinchRef.current = { startDist: pointerDistance(a, b), startScale: scaleRef.current };
+      mainPinchingRef.current = true;
+    }
+  };
+
+  const handleMainAreaPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    if (!mainPointersRef.current.has(event.pointerId)) return;
+    mainPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (mainPinchRef.current && mainPointersRef.current.size >= 2) {
+      const [a, b] = [...mainPointersRef.current.values()];
+      const ratio = pointerDistance(a, b) / (mainPinchRef.current.startDist || 1);
+      setScale(clampScale(mainPinchRef.current.startScale * ratio));
+    }
+  };
+
+  const handleMainAreaPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!mainPointersRef.current.delete(event.pointerId)) return;
+    if (mainPointersRef.current.size < 2) mainPinchRef.current = null;
+    if (mainPointersRef.current.size === 0) mainPinchingRef.current = false;
   };
 
   const handleCutAction = useCallback((p1: Point, p2: Point) => {
@@ -1256,6 +1312,14 @@ export function OnlineKaryotyping() {
   };
 
   const handleKaryogramMouseDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    // Second touch → pinch; abandon any in-progress single-finger drag/pan.
+    if (event.pointerType === "touch" && karyoPointersRef.current.size >= 1) {
+      karyoPinchingRef.current = true;
+      clearLongPress();
+      chromDragRef.current = null; setChromDrag(null); setDragOverClassIdx(null);
+      setIsPanning(null); setPanStart(null);
+      return;
+    }
     setHasDragged(false);
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch {}
     const canvas = karyogramCanvasRef.current;
@@ -1297,6 +1361,7 @@ export function OnlineKaryotyping() {
   };
 
   const handleKaryogramMouseMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (karyoPinchingRef.current) return; // a pinch owns the gesture
     const drag = chromDragRef.current;
     if (drag) {
       if (!drag.moved) {
@@ -1358,6 +1423,34 @@ export function OnlineKaryotyping() {
     if (newType === drag.type) { setStatusMsg(`Chromosome is already class ${target.className}.`); return; }
 
     setChromosomeType(newType, drag.boxIndex);
+  };
+
+  // ── Pinch-to-zoom on the karyogram area (touch) ──────────────────────────────
+  const handleKaryoAreaPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    karyoPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (karyoPointersRef.current.size === 2) {
+      const [a, b] = [...karyoPointersRef.current.values()];
+      karyoPinchRef.current = { startDist: pointerDistance(a, b), startScale: karyogramScaleRef.current };
+      karyoPinchingRef.current = true;
+    }
+  };
+
+  const handleKaryoAreaPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType !== "touch") return;
+    if (!karyoPointersRef.current.has(event.pointerId)) return;
+    karyoPointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (karyoPinchRef.current && karyoPointersRef.current.size >= 2) {
+      const [a, b] = [...karyoPointersRef.current.values()];
+      const ratio = pointerDistance(a, b) / (karyoPinchRef.current.startDist || 1);
+      setKaryogramScale(clampScale(karyoPinchRef.current.startScale * ratio));
+    }
+  };
+
+  const handleKaryoAreaPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!karyoPointersRef.current.delete(event.pointerId)) return;
+    if (karyoPointersRef.current.size < 2) karyoPinchRef.current = null;
+    if (karyoPointersRef.current.size === 0) karyoPinchingRef.current = false;
   };
 
   // ── File processing ──────────────────────────────────────────────────────────
@@ -1871,7 +1964,11 @@ export function OnlineKaryotyping() {
                 style={{ cursor: selectedFile ? "crosshair" : "pointer" }}
                 onDragOver={e => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
-                onDrop={handleDrop}>
+                onDrop={handleDrop}
+                onPointerDown={handleMainAreaPointerDown}
+                onPointerMove={handleMainAreaPointerMove}
+                onPointerUp={handleMainAreaPointerUp}
+                onPointerCancel={handleMainAreaPointerUp}>
 
                 {loading && loadingPhase === "analysis" && (
                   <div className="ws-loading-overlay">
@@ -2010,7 +2107,11 @@ export function OnlineKaryotyping() {
                     return (
                       <div ref={karyogramAreaRef}
                         className="ws-image-area"
-                        style={{ flex: hasGrid ? "0 0 45%" : "1 1 auto", minHeight: hasGrid ? 120 : 0, borderBottom: hasGrid ? "1px solid #c0c0c0" : "none" }}>
+                        style={{ flex: hasGrid ? "0 0 45%" : "1 1 auto", minHeight: hasGrid ? 120 : 0, borderBottom: hasGrid ? "1px solid #c0c0c0" : "none" }}
+                        onPointerDown={handleKaryoAreaPointerDown}
+                        onPointerMove={handleKaryoAreaPointerMove}
+                        onPointerUp={handleKaryoAreaPointerUp}
+                        onPointerCancel={handleKaryoAreaPointerUp}>
 
                         <div style={{
                           position:"relative", width:"100%", height:"100%",
