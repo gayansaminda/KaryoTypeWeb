@@ -1564,7 +1564,7 @@ export function OnlineKaryotyping() {
         @keyframes ws-shimmer { 0%,100%{background-position:-400px 0} 50%{background-position:400px 0} }
         @keyframes ws-dots { 0%{content:''} 33%{content:'.'} 66%{content:'..'} 100%{content:'...'} }
 
-        .ws-window { font-family:'Segoe UI',Tahoma,Geneva,sans-serif; font-size:12px; background:#fff; min-height:100vh; display:flex; flex-direction:column; color:#000; overflow:hidden; user-select:none; }
+        .ws-window { font-family:'Segoe UI',Tahoma,Geneva,sans-serif; font-size:12px; background:#fff; min-height:100vh; min-height:100dvh; display:flex; flex-direction:column; color:#000; overflow:hidden; user-select:none; }
         .ws-ribbon { background:linear-gradient(180deg,#f8f8f8 0%,#f0f0f0 100%); border-bottom:1px solid #c0c0c0; padding:6px 10px 4px; display:flex; align-items:flex-end; gap:2px; flex-shrink:0; flex-wrap:wrap; }
         .ws-ribbon-group { display:flex; gap:1px; padding:0 8px 0 0; margin-right:4px; border-right:1px solid #d0d0d0; }
         .ws-ribbon-group:last-child { border-right:none; }
@@ -1687,8 +1687,11 @@ export function OnlineKaryotyping() {
 
         /* ── Phone layout: stack to a single tabbed panel, roomier touch targets ── */
         @media (max-width: 767px) {
-          .ws-window { user-select:none; -webkit-tap-highlight-color:transparent; }
-          .ws-ribbon { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; justify-content:flex-start!important; padding:6px 6px 4px; }
+          /* Lock the page to the *visible* viewport so the ribbon can't scroll
+             up under the browser's address bar / notch. */
+          html, body, #root { height:100%; overflow:hidden; overscroll-behavior:none; }
+          .ws-window { height:100vh; height:100dvh; user-select:none; -webkit-tap-highlight-color:transparent; }
+          .ws-ribbon { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; justify-content:flex-start!important; padding:calc(6px + env(safe-area-inset-top)) 6px 4px; }
           .ws-ribbon > div { flex-wrap:nowrap!important; }
           .ws-ribbon-group { padding-right:6px; margin-right:3px; }
           .ws-rbtn { min-width:56px; padding:8px 10px 6px; font-size:11px; }
