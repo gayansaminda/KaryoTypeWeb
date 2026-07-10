@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import UTIF from "utif";
 import { useNavigate } from "react-router-dom";
 import { useIsMobile } from "../components/ui/use-mobile";
@@ -11,11 +11,23 @@ const BASE_URL = "https://karyotyping-api-875244011562.asia-south1.run.app";
 type Tool = "select" | "cut" | "erase" | "extend" | "merge" | "add";
 type LayoutMode = "full-left" | "prioritized-left" | "equal-Portion" | "full-Right" | "prioritized-Right";
 
-interface DetectedPoint {
-  polygon: Array<[number, number]>;
-  score: number;
-  bbox: [number, number, number, number];
+// Single source of truth on the frontend, mirrored from the backend Current_State and
+// matched by detectedChromosomeId. Drives BOTH the original-image editor (via the
+// mainImage fields) and the karyotype-report view (via the karyogram_* fields, which
+// stay empty until the report is generated).
+interface DetectedChromosome {
+  // null until the backend assigns an id (via /get_detectedPoints or /RefreshPolygons)
+  detectedChromosomeId: number | null;
+  // original-image (editor) view
+  polygon: Array<[number, number]>;       // = backend mainImage_polygon
+  score: number | null;                   // = backend detection_score (null when user-added/edited)
+  bbox: [number, number, number, number]; // = backend mainImage_bbox
   colorHue?: number;
+  // karyotype-report view — undefined until classification fills them
+  karyogram_polygon?: Array<[number, number]>;
+  karyogram_bounds?: { x_min: number; y_min: number; x_max: number; y_max: number; width: number; height: number };
+  class_id?: number;
+  is_assigned?: boolean;
 }
 
 interface ReportData {
@@ -129,6 +141,37 @@ function parseClassAreaBoxes(raw: any): ClassAreaBox[] {
     });
   }
   return out;
+}
+
+// Rebuild the detectedChromosomes list from a report response (classify / rotate /
+// setType), matched by id. `publicList` is the authoritative Current_State snapshot
+// (raw.chromosomes); `boxes` are the karyogram bounding boxes carrying the report
+// geometry. Existing colorHue is preserved so editor colors stay stable.
+function applyReportResponse(
+  prev: DetectedChromosome[],
+  publicList: any[],
+  boxes: any[],
+): DetectedChromosome[] {
+  const boxById = new Map<number, any>((boxes || []).map(b => [b.detected_chromosome_id, b]));
+  const prevById = new Map<number, DetectedChromosome>(
+    prev.filter(c => c.detectedChromosomeId !== null).map(c => [c.detectedChromosomeId as number, c])
+  );
+  return (publicList || []).map((pub: any) => {
+    const id = pub.DetectedChromosomeID;
+    const ex = prevById.get(id);
+    const box = boxById.get(id);
+    return {
+      detectedChromosomeId: id,
+      polygon: pub.mainImage_polygon,
+      bbox: pub.mainImage_bbox,
+      score: pub.detection_score ?? null,
+      colorHue: ex?.colorHue,
+      karyogram_polygon: box ? box.polygon : undefined,
+      karyogram_bounds: box ? box.bounds : undefined,
+      class_id: box ? box.class_id : pub.class_id,
+      is_assigned: pub.is_assigned,
+    } as DetectedChromosome;
+  });
 }
 
 const SVG = {
@@ -488,7 +531,7 @@ export function OnlineKaryotyping() {
   const [statusMsg, setStatusMsg]                   = useState("Ready");
   const [errorMsg, setErrorMsg]                     = useState<string | null>(null);
   const [debugInfo, setDebugInfo]                   = useState<string | null>(null);
-  const [DetectedChromosomeAreas, setDetectedChromosomeAreas] = useState<DetectedPoint[]>([]);
+  const [detectedChromosomes, setDetectedChromosomes] = useState<DetectedChromosome[]>([]);
   const [scale, setScale]                           = useState(1);
   const [karyogramScale, setKaryogramScale]         = useState(1);
   const [offset, setOffset]                         = useState({ x: 0, y: 0 });
@@ -499,7 +542,7 @@ export function OnlineKaryotyping() {
   const [selectedChromosomeArea, setSelectedChromosomeArea] = useState<number | null>(null);
   const [layoutMode, setLayoutMode]                 = useState<LayoutMode>("prioritized-left");
   const [karyogramImage, setKaryogramImage]         = useState<string | null>(null);
-  const [history, setHistory]                       = useState<DetectedPoint[][]>([]);
+  const [history, setHistory]                       = useState<DetectedChromosome[][]>([]);
   const [historyIndex, setHistoryIndex]             = useState(-1);
   const [selectedPolygonForMerge, setSelectedPolygonForMerge] = useState<number | null>(null);
   const [extendStarted, setExtendStarted]           = useState(false);
@@ -517,8 +560,21 @@ export function OnlineKaryotyping() {
   const [reportViewActive, setReportViewActive]     = useState(false);
   const [boundingPolygonsSynced, setBoundingPolygonsSynced] = useState(false);
   const [showHowItWorks, setShowHowItWorks]         = useState(false);
-  const [karyogramBoundingBoxes, setKaryogramBoundingBoxes] = useState<BoundingBox[]>([]);
   const [karyogramClassAreas, setKaryogramClassAreas] = useState<ClassAreaBox[]>([]);
+  // Karyogram regions are DERIVED from the single detectedChromosomes list — the report
+  // boxes for every chromosome that has been classified. Index semantics match the old
+  // karyogramBoundingBoxes state so the rest of the report code is unchanged.
+  const karyogramBoundingBoxes = useMemo(
+    () => detectedChromosomes
+      .filter(c => c.karyogram_polygon && c.karyogram_polygon.length > 0)
+      .map(c => ({
+        detectedChromosomeId: c.detectedChromosomeId,
+        polygon: c.karyogram_polygon as Array<[number, number]>,
+        bounds: c.karyogram_bounds,
+        class_id: c.class_id ?? -1,
+      })),
+    [detectedChromosomes]
+  );
   const [chromDrag, setChromDrag]                   = useState<{ boxIndex: number; type: number } | null>(null);
   const [dragOverClassIdx, setDragOverClassIdx]     = useState<number | null>(null);
   const [selectedKaryogramRegion, setSelectedKaryogramRegion] = useState<number | null>(null);
@@ -542,6 +598,9 @@ export function OnlineKaryotyping() {
   const virtualCanvasRef   = useRef<HTMLCanvasElement | null>(null);
   const extendSeedRef      = useRef<[number, number] | null>(null);
   const chromDragRef       = useRef<{ boxIndex: number; imageIndex: number; type: number; startX: number; startY: number; moved: boolean } | null>(null);
+  // Live cursor position (in karyogram natural-image coords) while dragging a chromosome
+  // to reclassify — drives the drag ghost that follows the pointer.
+  const dragCursorRef      = useRef<{ x: number; y: number } | null>(null);
   // Two-finger pinch-zoom tracking (per surface). pinching = true suppresses the
   // single-finger pan/draw handlers so a pinch never drives the pan logic.
   const mainPointersRef    = useRef<Map<number, { x: number; y: number }>>(new Map());
@@ -578,7 +637,7 @@ export function OnlineKaryotyping() {
   }, []);
 
   // ── History ──────────────────────────────────────────────────────────────────
-  const saveToHistory = useCallback((newAreas: DetectedPoint[]) => {
+  const saveToHistory = useCallback((newAreas: DetectedChromosome[]) => {
     setHistory(prev => {
       const newHistory = prev.slice(0, historyIndex + 1);
       newHistory.push([...newAreas]);
@@ -587,30 +646,75 @@ export function OnlineKaryotyping() {
     });
   }, [historyIndex]);
 
+  // Push the current area set to the backend so Current_State stays in sync after every
+  // edit (merge / extend / erase / delete / add / cut / undo). Sends {id, polygon} per
+  // area; the backend reconciles (updates existing ids, mints ids for new areas, drops
+  // removed ones), regenerates the report, and returns the full report payload. We adopt
+  // the reconciled ids and refresh the karyogram image, bounding boxes and class areas.
+  const syncPolygons = useCallback(async (list: DetectedChromosome[]) => {
+    if (!hasDetection) return;
+    try {
+      const fd = new FormData();
+      fd.append("polygons", JSON.stringify(list.map(c => ({
+        id: c.detectedChromosomeId ?? null,
+        polygon: c.polygon,
+      }))));
+      const res = await fetch(`${BASE_URL}/api/predict/RefreshPolygons`, { method: "POST", body: fd });
+      if (!res.ok) return;
+      const raw = await res.json();
+      if (!Array.isArray(raw?.chromosomes)) return;
+      setDetectedChromosomes(prev => applyReportResponse(prev, raw.chromosomes, raw.bounding_boxes || []));
+      if (raw.image) {
+        const url = raw.image.startsWith("data:") ? raw.image : `data:image/png;base64,${raw.image}`;
+        setKaryogramImage(url);
+      }
+      if (raw.Class_Area_Boxes) setKaryogramClassAreas(parseClassAreaBoxes(raw.Class_Area_Boxes));
+      setBoundingPolygonsSynced(true);
+    } catch {
+      /* best-effort sync; a failed refresh is retried on the next edit */
+    }
+  }, [hasDetection]);
+
+  // Select a chromosome across BOTH views at once, matched by DetectedChromosomeID.
+  // Passing null clears the selection in both views.
+  const selectByChromosome = useCallback((dc: DetectedChromosome | null) => {
+    if (!dc) { setSelectedChromosomeArea(null); setSelectedKaryogramRegion(null); return; }
+    const eIdx = detectedChromosomes.indexOf(dc);
+    setSelectedChromosomeArea(eIdx >= 0 ? eIdx : null);
+    const rIdx = dc.detectedChromosomeId === null
+      ? -1
+      : karyogramBoundingBoxes.findIndex(b => b.detectedChromosomeId === dc.detectedChromosomeId);
+    setSelectedKaryogramRegion(rIdx >= 0 ? rIdx : null);
+  }, [detectedChromosomes, karyogramBoundingBoxes]);
+
   const deleteSelectedChromosome = useCallback(() => {
     if (selectedChromosomeArea === null) return;
-    const newAreas = [...DetectedChromosomeAreas];
+    const newAreas = [...detectedChromosomes];
     newAreas.splice(selectedChromosomeArea, 1);
-    setDetectedChromosomeAreas(newAreas);
+    setDetectedChromosomes(newAreas);
     saveToHistory(newAreas);
+    syncPolygons(newAreas);
     setSelectedChromosomeArea(null);
     setSelectedKaryogramRegion(null);
     setBoundingPolygonsSynced(false);
     setStatusMsg("Deleted chromosome area");
-  }, [selectedChromosomeArea, DetectedChromosomeAreas, saveToHistory]);
+  }, [selectedChromosomeArea, detectedChromosomes, saveToHistory, syncPolygons]);
 
   const undoLastAction = useCallback(() => {
     if (historyIndex > 0) {
       const newIndex = historyIndex - 1;
       setHistoryIndex(newIndex);
-      setDetectedChromosomeAreas([...history[newIndex]]);
+      const restored = [...history[newIndex]];
+      setDetectedChromosomes(restored);
+      syncPolygons(restored);
       setSelectedChromosomeArea(null);
       setSelectedPolygonForMerge(null);
+      setBoundingPolygonsSynced(false);
       setStatusMsg("Undo: Restored previous state");
     } else {
       setStatusMsg("Nothing to undo");
     }
-  }, [historyIndex, history]);
+  }, [historyIndex, history, syncPolygons]);
 
   // On mobile, surface the report automatically once it becomes available.
   useEffect(() => {
@@ -663,7 +767,7 @@ export function OnlineKaryotyping() {
       }
       // Cancel a chromosome drag that was released outside the karyogram canvas.
       if (chromDragRef.current) {
-        chromDragRef.current = null;
+        chromDragRef.current = null; dragCursorRef.current = null;
         setChromDrag(null);
         setDragOverClassIdx(null);
       }
@@ -723,7 +827,27 @@ export function OnlineKaryotyping() {
         strokePolygon(karyogramClassAreas[dragOverClassIdx].polygon, "#22aa33", "hsla(130,70%,45%,0.25)", 3);
       }
       if (chromDrag.boxIndex < karyogramBoundingBoxes.length) {
-        strokePolygon(karyogramBoundingBoxes[chromDrag.boxIndex].polygon, "#0066cc", null, 2, [6, 4]);
+        const dragged = karyogramBoundingBoxes[chromDrag.boxIndex];
+        // Faint dashed outline at the chromosome's original spot (the "source").
+        strokePolygon(dragged.polygon, "#0066cc", null, 2, [6, 4]);
+
+        // Ghost that follows the cursor: the actual chromosome image cropped from the
+        // karyogram, drawn semi-transparent and centered on the pointer, with a solid
+        // bounding box so it clearly reads as "being dragged".
+        const b = dragged.bounds;
+        const cur = dragCursorRef.current;
+        if (b && cur && b.width > 0 && b.height > 0) {
+          const gx = cur.x - b.width / 2;
+          const gy = cur.y - b.height / 2;
+          ctx.save();
+          ctx.globalAlpha = 0.75;
+          ctx.drawImage(img, b.x_min, b.y_min, b.width, b.height, gx, gy, b.width, b.height);
+          ctx.restore();
+          ctx.strokeStyle = "#0066cc";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([]);
+          ctx.strokeRect(gx, gy, b.width, b.height);
+        }
       }
     }
   }, [karyogramBoundingBoxes, selectedKaryogramRegion, karyogramClassAreas, chromDrag, dragOverClassIdx]);
@@ -788,21 +912,16 @@ export function OnlineKaryotyping() {
     }
 
     if (activeTool === "select") {
-      for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
-        if (isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
-          setSelectedChromosomeArea(i);
+      for (let i = 0; i < detectedChromosomes.length; i++) {
+        if (isPointInPolygon([x, y], detectedChromosomes[i].polygon)) {
+          selectByChromosome(detectedChromosomes[i]); // selects in both views by id
           setSelectedPolygonForMerge(null);
-          if (boundingPolygonsSynced) {
-            const idx = karyogramBoundingBoxes.findIndex(b => b.image_index === i);
-            if (idx >= 0) setSelectedKaryogramRegion(idx);
-          }
           setStatusMsg(`Selected chromosome ${i + 1}`);
           return;
         }
       }
-      setSelectedChromosomeArea(null);
+      selectByChromosome(null);
       setSelectedPolygonForMerge(null);
-      if (boundingPolygonsSynced) setSelectedKaryogramRegion(null);
       return;
     }
 
@@ -817,8 +936,8 @@ export function OnlineKaryotyping() {
 
     if (activeTool === "merge") {
       if (selectedPolygonForMerge === null) {
-        for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
-          if (isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
+        for (let i = 0; i < detectedChromosomes.length; i++) {
+          if (isPointInPolygon([x, y], detectedChromosomes[i].polygon)) {
             setSelectedPolygonForMerge(i);
             setSelectedChromosomeArea(i);
             setStatusMsg(`Merge: selected polygon ${i + 1}. Click second polygon.`);
@@ -826,17 +945,22 @@ export function OnlineKaryotyping() {
           }
         }
       } else {
-        for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
-          if (i !== selectedPolygonForMerge && isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
-            const p1 = DetectedChromosomeAreas[selectedPolygonForMerge];
-            const p2 = DetectedChromosomeAreas[i];
+        for (let i = 0; i < detectedChromosomes.length; i++) {
+          if (i !== selectedPolygonForMerge && isPointInPolygon([x, y], detectedChromosomes[i].polygon)) {
+            const p1 = detectedChromosomes[selectedPolygonForMerge];
+            const p2 = detectedChromosomes[i];
             const merged   = mergePolygons(p1.polygon, p2.polygon);
-            const newAreas = [...DetectedChromosomeAreas];
+            const newAreas = [...detectedChromosomes];
             newAreas.splice(Math.max(selectedPolygonForMerge, i), 1);
             newAreas.splice(Math.min(selectedPolygonForMerge, i), 1);
-            newAreas.push({ ...p1, polygon: merged, score: (p1.score + p2.score) / 2 });
-            setDetectedChromosomeAreas(newAreas);
+            // Merged area keeps p1's identity; its stale report geometry is cleared.
+            newAreas.push({
+              ...p1, polygon: merged, score: ((p1.score ?? 0) + (p2.score ?? 0)) / 2,
+              karyogram_polygon: undefined, karyogram_bounds: undefined, class_id: undefined, is_assigned: undefined,
+            });
+            setDetectedChromosomes(newAreas);
             saveToHistory(newAreas);
+            syncPolygons(newAreas);
             setBoundingPolygonsSynced(false);
             setSelectedPolygonForMerge(null);
             setSelectedChromosomeArea(null);
@@ -869,8 +993,8 @@ export function OnlineKaryotyping() {
 
     if (activeTool === "extend" || activeTool === "erase" || activeTool === "add") {
       let hitIndex = -1;
-      for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
-        if (isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
+      for (let i = 0; i < detectedChromosomes.length; i++) {
+        if (isPointInPolygon([x, y], detectedChromosomes[i].polygon)) {
           hitIndex = i;
           break;
         }
@@ -883,7 +1007,7 @@ export function OnlineKaryotyping() {
         targetArea = hitIndex;
         setSelectedChromosomeArea(hitIndex);
         if (boundingPolygonsSynced) {
-          const idx = karyogramBoundingBoxes.findIndex(b => b.image_index === hitIndex);
+          const idx = karyogramBoundingBoxes.findIndex(b => b.detectedChromosomeId === detectedChromosomes[hitIndex].detectedChromosomeId);
           if (idx >= 0) setSelectedKaryogramRegion(idx);
         }
         setStatusMsg(`Selected chromosome ${hitIndex + 1}`);
@@ -906,12 +1030,12 @@ export function OnlineKaryotyping() {
         // Draw Current Polygon Black
         extendSeedRef.current = null;
         if (activeTool !== "add" && targetArea !== null) {
-          rasterizePolygon(vCtx, DetectedChromosomeAreas[targetArea].polygon);
+          rasterizePolygon(vCtx, detectedChromosomes[targetArea].polygon);
           // Seed inside the selected polygon — used by extend to keep tracing
           // the component that contains it (computed once per drag).
           if (activeTool === "extend") {
             extendSeedRef.current = findPolygonSeed(
-              DetectedChromosomeAreas[targetArea].polygon, vCanvas.width, vCanvas.height,
+              detectedChromosomes[targetArea].polygon, vCanvas.width, vCanvas.height,
             );
           }
         }
@@ -930,8 +1054,8 @@ export function OnlineKaryotyping() {
     }
 
     let hit = false;
-    for (let i = 0; i < DetectedChromosomeAreas.length; i++) {
-      if (isPointInPolygon([x, y], DetectedChromosomeAreas[i].polygon)) {
+    for (let i = 0; i < detectedChromosomes.length; i++) {
+      if (isPointInPolygon([x, y], detectedChromosomes[i].polygon)) {
         hit = true;
         break;
       }
@@ -1001,22 +1125,29 @@ export function OnlineKaryotyping() {
 
           if (activeTool === "add") {
             const ys = newPolygon.map(p => p[1]), xs = newPolygon.map(p => p[0]);
-            const newArea: DetectedPoint = {
+            const newArea: DetectedChromosome = {
+              detectedChromosomeId: null, // minted by the backend on the next RefreshPolygons
               polygon: newPolygon,
-              score: 1.0,
-              bbox: [Math.min(...ys), Math.min(...xs), Math.max(...ys), Math.max(...xs)],
-              colorHue: (DetectedChromosomeAreas.length * 137.5) % 360 // Use golden angle for color distribution
+              score: null,
+              bbox: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
+              colorHue: (detectedChromosomes.length * 137.5) % 360 // Use golden angle for color distribution
             };
-            const newAreas = [...DetectedChromosomeAreas, newArea];
-            setDetectedChromosomeAreas(newAreas);
+            const newAreas = [...detectedChromosomes, newArea];
+            setDetectedChromosomes(newAreas);
             saveToHistory(newAreas);
+            syncPolygons(newAreas);
             setSelectedChromosomeArea(newAreas.length - 1);
             setStatusMsg("New chromosome area added.");
           } else if (selectedChromosomeArea !== null) {
-            const newAreas = [...DetectedChromosomeAreas];
-            newAreas[selectedChromosomeArea] = { ...newAreas[selectedChromosomeArea], polygon: newPolygon };
-            setDetectedChromosomeAreas(newAreas);
+            const newAreas = [...detectedChromosomes];
+            // Geometry changed → clear this area's stale report fields.
+            newAreas[selectedChromosomeArea] = {
+              ...newAreas[selectedChromosomeArea], polygon: newPolygon,
+              karyogram_polygon: undefined, karyogram_bounds: undefined, class_id: undefined, is_assigned: undefined,
+            };
+            setDetectedChromosomes(newAreas);
             saveToHistory(newAreas);
+            syncPolygons(newAreas);
             setStatusMsg(activeTool === "extend" ? "Polygon extended." : "Polygon erased.");
           }
           setBoundingPolygonsSynced(false);
@@ -1125,22 +1256,26 @@ export function OnlineKaryotyping() {
 
   const handleCutAction = useCallback((p1: Point, p2: Point) => {
     let splitHappened = false;
-    const newAreas: DetectedPoint[] = [];
-    DetectedChromosomeAreas.forEach(area => {
+    const newAreas: DetectedChromosome[] = [];
+    detectedChromosomes.forEach(area => {
       const result = splitPolygonWithLine(area.polygon, p1, p2);
       if (result.length > 1) {
         splitHappened = true;
         const [r0, r1] = result;
         const bigger   = getPolygonArea(r0) >= getPolygonArea(r1);
-        newAreas.push({ ...area, polygon: bigger ? r0 : r1 });
-        newAreas.push({ ...area, polygon: bigger ? r1 : r0, colorHue: ((area.colorHue ?? 0) + 60) % 360 });
+        // First piece keeps this area's identity; both pieces lose stale report geometry.
+        const cleared = { karyogram_polygon: undefined, karyogram_bounds: undefined, class_id: undefined, is_assigned: undefined };
+        newAreas.push({ ...area, ...cleared, polygon: bigger ? r0 : r1 });
+        // Second piece is a new chromosome — null id so the backend mints a fresh one.
+        newAreas.push({ ...area, ...cleared, detectedChromosomeId: null, polygon: bigger ? r1 : r0, colorHue: ((area.colorHue ?? 0) + 60) % 360 });
       } else {
         newAreas.push(area);
       }
     });
     if (splitHappened) {
-      setDetectedChromosomeAreas(newAreas);
+      setDetectedChromosomes(newAreas);
       saveToHistory(newAreas);
+      syncPolygons(newAreas);
       setBoundingPolygonsSynced(false);
       setSelectedChromosomeArea(null);
       setLastCutLine(null);
@@ -1149,7 +1284,7 @@ export function OnlineKaryotyping() {
       setLastCutLine({ p1, p2 });
       setStatusMsg("No intersections found.");
     }
-  }, [DetectedChromosomeAreas, saveToHistory]);
+  }, [detectedChromosomes, saveToHistory, syncPolygons]);
 
   // ── Karyogram canvas click ───────────────────────────────────────────────────
   // Identical coordinate math to main canvas click
@@ -1163,14 +1298,16 @@ export function OnlineKaryotyping() {
 
     for (let i = 0; i < karyogramBoundingBoxes.length; i++) {
       if (isPointInPolygon([x, y], karyogramBoundingBoxes[i].polygon)) {
-        setSelectedKaryogramRegion(i);
         const bbox = karyogramBoundingBoxes[i];
-        if (boundingPolygonsSynced && bbox.image_index >= 0) setSelectedChromosomeArea(bbox.image_index);
-        setStatusMsg(`Selected: Class=${bbox.class_id}, Index=${bbox.image_index}`);
+        const dc = detectedChromosomes.find(c => c.detectedChromosomeId === bbox.detectedChromosomeId) ?? null;
+        // Select in both views by id (region index resolves back to i).
+        setSelectedKaryogramRegion(i);
+        setSelectedChromosomeArea(dc ? detectedChromosomes.indexOf(dc) : null);
+        setStatusMsg(`Selected: Class=${bbox.class_id}, ID=${bbox.detectedChromosomeId}`);
         return;
       }
     }
-    setSelectedKaryogramRegion(null);
+    selectByChromosome(null);
     setStatusMsg("Karyogram: no region at clicked point");
   };
 
@@ -1192,7 +1329,8 @@ export function OnlineKaryotyping() {
     if (hitIdx !== -1) {
       setSelectedKaryogramRegion(hitIdx);
       const bbox = karyogramBoundingBoxes[hitIdx];
-      if (boundingPolygonsSynced && bbox.image_index >= 0) setSelectedChromosomeArea(bbox.image_index);
+      const editorIdx = detectedChromosomes.findIndex(c => c.detectedChromosomeId === bbox.detectedChromosomeId);
+      if (boundingPolygonsSynced && editorIdx >= 0) setSelectedChromosomeArea(editorIdx);
       setContextMenu({ x: clientX, y: clientY });
     } else {
       setContextMenu(null);
@@ -1222,7 +1360,8 @@ export function OnlineKaryotyping() {
     if (hitIdx !== -1) {
       setSelectedKaryogramRegion(hitIdx);
       const bbox = karyogramBoundingBoxes[hitIdx];
-      if (boundingPolygonsSynced && bbox.image_index >= 0) setSelectedChromosomeArea(bbox.image_index);
+      const editorIdx = detectedChromosomes.findIndex(c => c.detectedChromosomeId === bbox.detectedChromosomeId);
+      if (boundingPolygonsSynced && editorIdx >= 0) setSelectedChromosomeArea(editorIdx);
       rotateChromosome(180, hitIdx);
     }
   };
@@ -1233,9 +1372,10 @@ export function OnlineKaryotyping() {
 
     // Get the specific bounding box
     const bbox = karyogramBoundingBoxes[idx];
+    if (bbox.detectedChromosomeId === null) return;
 
     const fd = new FormData();
-    fd.append("boundingBoxIndex", bbox.image_index.toString());
+    fd.append("DetectedChromosomeID", bbox.detectedChromosomeId.toString());
     fd.append("rotationAngle", angle.toString());
 
     setLoading(true);
@@ -1254,7 +1394,7 @@ export function OnlineKaryotyping() {
       if (raw.image && raw.bounding_boxes) {
         const imageDataUrl = raw.image.startsWith("data:") ? raw.image : `data:image/png;base64,${raw.image}`;
         setKaryogramImage(imageDataUrl);
-        setKaryogramBoundingBoxes(raw.bounding_boxes);
+        setDetectedChromosomes(prev => applyReportResponse(prev, raw.chromosomes, raw.bounding_boxes));
         if (raw.Class_Area_Boxes) setKaryogramClassAreas(parseClassAreaBoxes(raw.Class_Area_Boxes));
         setStatusMsg("Rotation complete.");
       }
@@ -1271,8 +1411,9 @@ export function OnlineKaryotyping() {
     if (idx === null || !selectedFile || karyogramBoundingBoxes.length === 0) return;
 
     const bbox = karyogramBoundingBoxes[idx];
+    if (bbox.detectedChromosomeId === null) return;
     const fd = new FormData();
-    fd.append("boundingBoxIndex", bbox.image_index.toString());
+    fd.append("DetectedChromosomeID", bbox.detectedChromosomeId.toString());
     fd.append("newType", type.toString());
 
     setLoading(true);
@@ -1292,7 +1433,7 @@ export function OnlineKaryotyping() {
       if (raw.image && raw.bounding_boxes) {
         const imageDataUrl = raw.image.startsWith("data:") ? raw.image : `data:image/png;base64,${raw.image}`;
         setKaryogramImage(imageDataUrl);
-        setKaryogramBoundingBoxes(raw.bounding_boxes);
+        setDetectedChromosomes(prev => applyReportResponse(prev, raw.chromosomes, raw.bounding_boxes));
         if (raw.Class_Area_Boxes) setKaryogramClassAreas(parseClassAreaBoxes(raw.Class_Area_Boxes));
         setStatusMsg("Type updated.");
       }
@@ -1316,7 +1457,7 @@ export function OnlineKaryotyping() {
     if (event.pointerType === "touch" && karyoPointersRef.current.size >= 1) {
       karyoPinchingRef.current = true;
       clearLongPress();
-      chromDragRef.current = null; setChromDrag(null); setDragOverClassIdx(null);
+      chromDragRef.current = null; dragCursorRef.current = null; setChromDrag(null); setDragOverClassIdx(null);
       setIsPanning(null); setPanStart(null);
       return;
     }
@@ -1338,7 +1479,7 @@ export function OnlineKaryotyping() {
     if (hitIdx !== -1) {
       const b = karyogramBoundingBoxes[hitIdx];
       chromDragRef.current = {
-        boxIndex: hitIdx, imageIndex: b.image_index, type: classIdToType(b.class_id),
+        boxIndex: hitIdx, imageIndex: b.detectedChromosomeId ?? -1, type: classIdToType(b.class_id),
         startX: event.clientX, startY: event.clientY, moved: false,
       };
       // Touch: a long press opens the context menu (replacing right-click).
@@ -1348,7 +1489,7 @@ export function OnlineKaryotyping() {
         clearLongPress();
         longPressTimerRef.current = window.setTimeout(() => {
           longPressFiredRef.current = true;
-          chromDragRef.current = null;
+          chromDragRef.current = null; dragCursorRef.current = null;
           setChromDrag(null);
           setDragOverClassIdx(null);
           setHasDragged(true);
@@ -1383,6 +1524,10 @@ export function OnlineKaryotyping() {
           for (let i = 0; i < karyogramClassAreas.length; i++) {
             if (isPointInPolygon([x, y], karyogramClassAreas[i].polygon)) { overIdx = i; break; }
           }
+          // Track the cursor and redraw so the drag ghost follows smoothly even when
+          // dragOverClassIdx (which would otherwise trigger a re-render) doesn't change.
+          dragCursorRef.current = { x, y };
+          drawKaryogramBounds();
           setDragOverClassIdx(overIdx);
         }
       }
@@ -1401,7 +1546,7 @@ export function OnlineKaryotyping() {
     clearLongPress();
     const drag = chromDragRef.current;
     if (!drag) return;
-    chromDragRef.current = null;
+    chromDragRef.current = null; dragCursorRef.current = null;
     setChromDrag(null);
     setDragOverClassIdx(null);
     if (!drag.moved) return; // plain click — let onClick handle selection
@@ -1458,8 +1603,8 @@ export function OnlineKaryotyping() {
     setResultImage(prev => { revokeBlob(prev); return null; });
     setPreview(prev => { revokeBlob(prev); return null; });
     setReportData(null); setHasDetection(false); setErrorMsg(null); setDebugInfo(null);
-    setDetectedChromosomeAreas([]); setSelectedChromosomeArea(null);
-    setKaryogramImage(null); setKaryogramBoundingBoxes([]); setKaryogramClassAreas([]); setSelectedKaryogramRegion(null);
+    setDetectedChromosomes([]); setSelectedChromosomeArea(null);
+    setKaryogramImage(null); setKaryogramClassAreas([]); setSelectedKaryogramRegion(null);
     setBoundingPolygonsSynced(false); setSelectedFile(file);
     setScale(1); setOffset({ x: 0, y: 0 }); setKaryogramOffset({ x: 0, y: 0 }); setKaryogramScale(1);
     setStatusMsg(`Loaded: ${file.name}`); setHistory([]); setHistoryIndex(-1); setReportViewActive(false);
@@ -1498,8 +1643,8 @@ export function OnlineKaryotyping() {
     if (!selectedFile || loading) return;
     setResultImage(prev => { revokeBlob(prev); return null; });
     setReportData(null); setHasDetection(false); setErrorMsg(null); setDebugInfo(null);
-    setDetectedChromosomeAreas([]); setSelectedChromosomeArea(null);
-    setKaryogramImage(null); setKaryogramBoundingBoxes([]); setKaryogramClassAreas([]); setSelectedKaryogramRegion(null);
+    setDetectedChromosomes([]); setSelectedChromosomeArea(null);
+    setKaryogramImage(null); setKaryogramClassAreas([]); setSelectedKaryogramRegion(null);
     setBoundingPolygonsSynced(false); setKaryogramScale(1);
     setOffset({ x: 0, y: 0 }); setKaryogramOffset({ x: 0, y: 0 }); setReportViewActive(false);
 
@@ -1515,16 +1660,24 @@ export function OnlineKaryotyping() {
       }
       const data = await res.json();
       if (data.detections?.length > 0) {
-        const detectionsWithHue = data.detections.map((d: DetectedPoint, i: number) => ({
-          ...d, colorHue: (i * 360) / data.detections.length,
+        // Map the backend public dicts into the single detectedChromosomes list.
+        const chroms: DetectedChromosome[] = data.detections.map((d: any, i: number) => ({
+          detectedChromosomeId: d.DetectedChromosomeID,
+          polygon: d.mainImage_polygon,
+          bbox: d.mainImage_bbox,
+          score: d.detection_score ?? null,
+          colorHue: (i * 360) / data.detections.length,
         }));
-        setDetectedChromosomeAreas(detectionsWithHue);
+        setDetectedChromosomes(chroms);
         setSelectedChromosomeArea(0);
         setResultImage(preview);
         setHasDetection(true);
-        setStatusMsg(`Detection complete — ${data.detections.length} chromosomes identified.`);
-        saveToHistory(data.detections);
-        setTimeout(() => generateReport(), 0);
+        setStatusMsg(`Detection complete — ${chroms.length} chromosomes identified.`);
+        saveToHistory(chroms);
+        // Generate the karyotype report automatically — no separate Report click needed.
+        setKaryogramScale(1); setKaryogramOffset({ x: 0, y: 0 });
+        setLoadingPhase("report"); setStatusMsg("Generating karyotype report…");
+        await generateReportCore();
       } else {
         setErrorMsg("No chromosomes detected");
         setStatusMsg("Detection complete — no chromosomes found.");
@@ -1538,18 +1691,13 @@ export function OnlineKaryotyping() {
   };
 
   // ── Generate Report ───────────────────────────────────────────────────────────
-  const generateReport = async () => {
-    if (!selectedFile || loading || !hasDetection) return;
-    setErrorMsg(null); setDebugInfo(null);
-    setKaryogramScale(1); setOffset({ x: 0, y: 0 }); setKaryogramOffset({ x: 0, y: 0 });
-
-    const fd = new FormData();
-    fd.append("image", selectedFile);
-    fd.append("polygons", JSON.stringify(DetectedChromosomeAreas.map(a => a.polygon)));
-    setLoading(true); setLoadingPhase("report"); setStatusMsg("Generating karyotype report…");
-
+  // Core report fetch + state update. Runs classification against the polygons already
+  // synced into the backend Current_State. Does NOT guard or manage loading — callers
+  // (runAnalysis for the automatic first report, generateReport for the Report button)
+  // own that so the report can be generated both automatically and on demand.
+  const generateReportCore = async () => {
     try {
-      const res = await fetch(`${BASE_URL}/api/predict/get_classifications_WithPolygons`, { method: "POST", body: fd });
+      const res = await fetch(`${BASE_URL}/api/predict/get_classifications`, { method: "POST" });
       if (!res.ok) {
         setErrorMsg(`Classification failed: ${await parseErrorDetail(res)}`);
         setStatusMsg(`Error: classification failed (${res.status}).`);
@@ -1572,7 +1720,7 @@ export function OnlineKaryotyping() {
       if (raw.image && raw.bounding_boxes) {
         const imageDataUrl = raw.image.startsWith("data:") ? raw.image : `data:image/png;base64,${raw.image}`;
         setKaryogramImage(imageDataUrl);
-        setKaryogramBoundingBoxes(raw.bounding_boxes);
+        setDetectedChromosomes(prev => applyReportResponse(prev, raw.chromosomes, raw.bounding_boxes));
         setKaryogramClassAreas(parseClassAreaBoxes(raw.Class_Area_Boxes));
         setSelectedKaryogramRegion(null); setBoundingPolygonsSynced(true);
         setKaryogramScale(1); setKaryogramOffset({ x: 0, y: 0 });
@@ -1606,6 +1754,17 @@ export function OnlineKaryotyping() {
     } catch (e: any) {
       setErrorMsg(`Classification failed: ${e?.message || "Network error"}`);
       setStatusMsg("Error: could not reach the server.");
+    }
+  };
+
+  // Report button: re-generate the report on demand (e.g. after editing chromosomes).
+  const generateReport = async () => {
+    if (!selectedFile || loading || !hasDetection) return;
+    setErrorMsg(null); setDebugInfo(null);
+    setKaryogramScale(1); setOffset({ x: 0, y: 0 }); setKaryogramOffset({ x: 0, y: 0 });
+    setLoading(true); setLoadingPhase("report"); setStatusMsg("Generating karyotype report…");
+    try {
+      await generateReportCore();
     } finally {
       setLoading(false); setLoadingPhase(null);
     }
@@ -1947,7 +2106,7 @@ export function OnlineKaryotyping() {
               <div className="ws-panel-titlebar">
                 <span className="ws-panel-title">
                   Image Viewer
-                  {hasDetection && <span className="ws-detect-badge">{SVG.check}&nbsp;{DetectedChromosomeAreas.length} detected</span>}
+                  {hasDetection && <span className="ws-detect-badge">{SVG.check}&nbsp;{detectedChromosomes.length} detected</span>}
                   {selectedChromosomeArea !== null && <span className="ws-detect-badge" style={{ background:"#cce4ff", color:"#0066cc" }}>Selected: #{selectedChromosomeArea + 1}</span>}
                   <label style={{ display: "flex", alignItems: "center", gap: "4px", fontSize: "11px", fontWeight: "normal", cursor: "pointer", marginLeft: "12px", color: "#666" }}>
                     <input type="checkbox" checked={markDetected} onChange={e => setMarkDetected(e.target.checked)} />
@@ -1985,7 +2144,7 @@ export function OnlineKaryotyping() {
                   }}>
                     <img src={displayImage} alt="Chromosome spread" draggable={false}
                       style={{ maxWidth:"100%", maxHeight:"100%", objectFit:"contain" }}/>
-                    {DetectedChromosomeAreas.length > 0 && (
+                    {detectedChromosomes.length > 0 && (
                       <svg
                         ref={svgRef}
                         viewBox={`0 0 ${imgSize.w} ${imgSize.h}`}
@@ -2003,13 +2162,13 @@ export function OnlineKaryotyping() {
                           display: "block", pointerEvents: "auto", objectFit: "contain"
                         }}
                       >
-                        {DetectedChromosomeAreas.map((detection, index) => {
+                        {detectedChromosomes.map((detection, index) => {
                           const isSelected = selectedChromosomeArea === index;
                           const isMergeSelected = selectedPolygonForMerge === index;
 
                           if (!markDetected && !isSelected && !isMergeSelected) return null;
 
-                          const hue = detection.colorHue ?? (index * 360) / DetectedChromosomeAreas.length;
+                          const hue = detection.colorHue ?? (index * 360) / detectedChromosomes.length;
                           return (
                             <polygon
                               key={index}
@@ -2064,7 +2223,7 @@ export function OnlineKaryotyping() {
                     <button aria-label="Reset zoom" onClick={resetMain}>⟲</button>
                   </div>
                 )}
-                {isMobile && displayImage && DetectedChromosomeAreas.length > 0 &&
+                {isMobile && displayImage && detectedChromosomes.length > 0 &&
                  (activeTool === "extend" || activeTool === "erase" || activeTool === "add") && (
                   <button
                     className="ws-brush-btn"
